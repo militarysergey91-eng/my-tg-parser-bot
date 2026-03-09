@@ -85,8 +85,30 @@ def save_channels(channels):
     with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
         json.dump(channels, f, ensure_ascii=False, indent=2)
 
+def normalize_channel_url(url):
+    """Нормализует URL канала, убирая лишние t.me/"""
+    # Убираем @ в начале
+    url = url.replace('@', '')
+    
+    # Если ссылка уже содержит t.me, нормализуем её
+    if 't.me/' in url:
+        # Разбиваем по t.me/ и берем последнюю часть
+        parts = url.split('t.me/')
+        username = parts[-1].strip('/')
+        # Убираем лишние слеши в username
+        username = username.split('/')[0]
+        return f"https://t.me/{username}"
+    
+    # Если просто имя канала
+    if '/' not in url and not url.startswith('http'):
+        return f"https://t.me/{url}"
+    
+    return url
+
 def extract_channel_name(url):
     """Извлекает имя канала из ссылки"""
+    # Сначала нормализуем URL
+    url = normalize_channel_url(url)
     match = re.search(r't\.me/(?:s/)?([a-zA-Z0-9_]+)', url)
     if match:
         return match.group(1)
@@ -146,11 +168,8 @@ def import_channels_from_excel(file_path):
                 
                 # Проверяем, что ссылка валидная
                 if url and ('t.me/' in url or '@' in url):
-                    # Приводим ссылку к единому формату
-                    if '@' in url:
-                        url = url.replace('@', 'https://t.me/')
-                    elif not url.startswith('http'):
-                        url = f"https://t.me/{url}"
+                    # Нормализуем ссылку
+                    url = normalize_channel_url(url)
                     
                     # Проверяем на дубликаты
                     if url in current_urls:
@@ -209,11 +228,8 @@ def import_channels_from_txt(file_path):
             
             # Проверяем, что ссылка валидная
             if url and ('t.me/' in url or '@' in url):
-                # Приводим ссылку к единому формату
-                if '@' in url:
-                    url = url.replace('@', 'https://t.me/')
-                elif not url.startswith('http'):
-                    url = f"https://t.me/{url}"
+                # Нормализуем ссылку
+                url = normalize_channel_url(url)
                 
                 # Проверяем на дубликаты
                 if url in current_urls:
@@ -685,8 +701,8 @@ async def add_channel_prompt(message: types.Message):
         "🔗 Отправь ссылку на Telegram-канал\n\n"
         "Примеры:\n"
         "• https://t.me/durov\n"
-        "• https://t.me/s/breakingmash\n"
-        "• @durov\n\n"
+        "• @durov\n"
+        "• durov\n\n"
         "✅ Канал добавится в общий список для всех пользователей!\n\n"
         "Я сам определю название канала!"
     )
@@ -1444,10 +1460,8 @@ async def process_channel_link(message: types.Message):
         user_id = message.from_user.id
         link = message.text.strip()
         
-        link = link.replace('@', '')
-        if not link.startswith('http'):
-            if '/' not in link:
-                link = f"https://t.me/{link}"
+        # Нормализуем ссылку
+        link = normalize_channel_url(link)
         
         channel_name = extract_channel_name(link)
         if not channel_name:
@@ -1698,7 +1712,9 @@ async def collect_and_send_report(user_id):
             await bot.send_message(user_id, f"📱 [{processed_channels}/{len(channels)}] Анализирую: {channel['name']}")
             
             try:
-                entity = await client.get_entity(channel['url'])
+                # Нормализуем URL перед использованием
+                channel_url = normalize_channel_url(channel['url'])
+                entity = await client.get_entity(channel_url)
                 
                 posts_count = 0
                 channel_posts = []  # Временное хранилище для постов канала
@@ -1737,7 +1753,7 @@ async def collect_and_send_report(user_id):
                 if posts_count > 0:
                     channels_with_posts += 1
                     doc.add_heading(f"Канал: {channel['name']}", level=1)
-                    doc.add_paragraph(f"Ссылка: {channel['url']}")
+                    doc.add_paragraph(f"Ссылка: {channel_url}")
                     doc.add_paragraph()
                     
                     # Добавляем все сохраненные посты
@@ -1775,7 +1791,7 @@ async def collect_and_send_report(user_id):
                         
                         # Добавляем активную ссылку на пост
                         if message.id:
-                            channel_username = channel['url'].split('/')[-1]
+                            channel_username = channel_url.split('/')[-1]
                             link_text = f"🔗 Ссылка на пост"
                             link_url = f"https://t.me/{channel_username}/{message.id}"
                             
@@ -1804,8 +1820,11 @@ async def collect_and_send_report(user_id):
                 continue
                 
             except Exception as e:
-                await bot.send_message(user_id, f"⚠️ Ошибка с каналом {channel['name']}: {str(e)[:200]}")
-                doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']}")
+                error_msg = str(e)
+                # Показываем нормализованный URL в ошибке
+                channel_url = normalize_channel_url(channel['url'])
+                await bot.send_message(user_id, f"⚠️ Ошибка с каналом {channel['name']}: {error_msg[:200]}")
+                doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']} ({channel_url})")
                 doc.add_page_break()
         
         doc.add_heading('Итоговая статистика', level=1)
@@ -1920,6 +1939,14 @@ if __name__ == '__main__':
     print(f"👑 Администратор ID: {ADMIN_ID}")
     print(f"📊 Всего каналов в базе: {len(channels)}")
     print(f"📁 Папки: {SESSIONS_DIR}, {IMAGES_DIR}, {UPLOADS_DIR}")
+    
+    # Показываем список каналов для проверки
+    if channels:
+        print("\n📋 Список каналов:")
+        for i, ch in enumerate(channels, 1):
+            print(f"  {i}. {ch['name']} - {ch['url']}")
+    else:
+        print("\n📭 Список каналов пуст")
     
     if MASTER_SESSION:
         print("✅ Мастер-сессия загружена")
