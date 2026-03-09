@@ -209,25 +209,32 @@ def is_admin(user_id):
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id):
     """Главная клавиатура с кнопками (разная для админа и обычных пользователей)"""
-    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     
-    # Общие кнопки для всех
+    # Для обычных пользователей
+    if not is_admin(user_id):
+        keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+        keyboard.add(
+            KeyboardButton("📋 Мои каналы"),
+            KeyboardButton("➕ Добавить канал"),
+            KeyboardButton("🔍 Поиск"),
+            KeyboardButton("❓ Помощь"),
+            KeyboardButton("⏹️ Стоп")
+        )
+        return keyboard
+    
+    # Для админа
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("📋 Мои каналы"),
         KeyboardButton("➕ Добавить канал"),
-        KeyboardButton("🔍 Поиск по словам"),
+        KeyboardButton("🔍 Поиск"),
         KeyboardButton("🔄 Собрать всё"),
         KeyboardButton("❓ Помощь"),
-        KeyboardButton("⏹️ Стоп")
+        KeyboardButton("⏹️ Стоп"),
+        KeyboardButton("🔄 Сменить аккаунт"),
+        KeyboardButton("🚪 Разлогиниться"),
+        KeyboardButton("👤 Мой аккаунт")
     )
-    
-    # Кнопки только для админа
-    if is_admin(user_id):
-        keyboard.add(
-            KeyboardButton("🔄 Сменить аккаунт"),
-            KeyboardButton("🚪 Разлогиниться"),
-            KeyboardButton("👤 Мой аккаунт")
-        )
     
     return keyboard
 
@@ -276,10 +283,9 @@ async def cmd_start(message: types.Message):
         "Как пользоваться:\n"
         "1️⃣ Нажми '➕ Добавить канал' и отправь ссылку на канал\n"
         "2️⃣ Добавь несколько каналов\n"
-        "3️⃣ Нажми '🔍 Поиск по словам' для поиска по ключевым словам\n"
-        "4️⃣ Или '🔄 Собрать всё' для получения всех постов\n"
-        "5️⃣ Выбери период времени (1 час, 3 часа, 7 дней и т.д.)\n"
-        "6️⃣ Выбери формат отчета: с картинками или только текст\n\n"
+        "3️⃣ Нажми '🔍 Поиск' для поиска по ключевым словам\n"
+        "4️⃣ Выбери период времени (1 час, 3 часа, 7 дней и т.д.)\n"
+        "5️⃣ Выбери формат отчета: с картинками или только текст\n\n"
         "⏹️ Остановить формирование отчета - нажми '⏹️ Стоп'\n"
     )
     
@@ -287,6 +293,7 @@ async def cmd_start(message: types.Message):
     if is_admin(user_id):
         welcome_text += (
             "\n👑 Вы администратор. Доступны дополнительные функции:\n"
+            "• 🔄 Собрать всё - получить все посты без фильтра\n"
             "• 🔄 Сменить аккаунт - авторизоваться под другим номером\n"
             "• 🚪 Разлогиниться - выйти из аккаунта\n"
             "• 👤 Мой аккаунт - информация о текущем аккаунте\n"
@@ -300,7 +307,7 @@ async def cmd_start(message: types.Message):
     if not MASTER_SESSION and is_admin(user_id):
         welcome_text += (
             "\n⚠️ Мастер-сессия не найдена!\n"
-            "Нажми '🔍 Поиск по словам' для авторизации."
+            "Нажми '🔍 Поиск' для авторизации."
         )
     
     await message.reply(welcome_text, reply_markup=get_main_keyboard(user_id))
@@ -418,7 +425,7 @@ async def cmd_checksession(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "📋 Мои каналы")
 async def show_channels(message: types.Message):
-    """Показывает список сохраненных каналов"""
+    """Показывает список сохраненных каналов с возможностью перехода по ссылке"""
     user_id = message.from_user.id
     
     channels = load_channels()
@@ -431,20 +438,32 @@ async def show_channels(message: types.Message):
         )
         return
     
+    # Создаем клавиатуру с кнопками для каждого канала
     keyboard = InlineKeyboardMarkup(row_width=1)
     for i, channel in enumerate(channels):
-        btn_text = f"{channel['name']}"
-        keyboard.add(InlineKeyboardButton(btn_text, callback_data=f"delete_{i}"))
+        # Кнопка для перехода на канал
+        channel_button = InlineKeyboardButton(
+            f"📢 {channel['name']}", 
+            url=channel['url']
+        )
+        # Кнопка для удаления канала
+        delete_button = InlineKeyboardButton(
+            f"❌ Удалить", 
+            callback_data=f"delete_{i}"
+        )
+        # Добавляем обе кнопки в один ряд
+        keyboard.row(channel_button, delete_button)
     
     keyboard.add(InlineKeyboardButton("❌ Удалить все", callback_data="delete_all"))
     keyboard.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
     
     text = f"📋 Твои каналы:\n\n"
     for i, channel in enumerate(channels, 1):
-        text += f"{i}. {channel['name']} - {channel['url']}\n"
+        text += f"{i}. {channel['name']}\n"
     
     text += f"\nВсего каналов: {len(channels)}\n\n"
-    text += "Нажми на канал чтобы удалить его"
+    text += "Нажми на название канала чтобы перейти\n"
+    text += "Нажми ❌ Удалить чтобы удалить канал"
     
     await message.reply(text, reply_markup=keyboard)
 
@@ -464,7 +483,7 @@ async def add_channel_prompt(message: types.Message):
     
     user_data[user_id] = {'state': 'waiting_channel_link'}
 
-@dp.message_handler(lambda message: message.text == "🔍 Поиск по словам")
+@dp.message_handler(lambda message: message.text == "🔍 Поиск")
 async def search_by_keywords(message: types.Message):
     """Поиск по ключевым словам"""
     user_id = message.from_user.id
@@ -506,25 +525,28 @@ async def search_by_keywords(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "🔄 Собрать всё")
 async def collect_all(message: types.Message):
-    """Собрать все посты без фильтра"""
+    """Собрать все посты без фильтра (только для админа)"""
     user_id = message.from_user.id
+    
+    # Проверяем, админ ли пользователь
+    if not is_admin(user_id):
+        await message.reply(
+            "❌ Эта функция доступна только администратору.\n"
+            "Используйте '🔍 Поиск' для поиска по ключевым словам.",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
     
     global MASTER_SESSION
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
     
     if not MASTER_SESSION:
-        if is_admin(user_id):
-            await message.reply(
-                "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
-                reply_markup=get_auth_keyboard()
-            )
-            await start_authorization(user_id, message)
-        else:
-            await message.reply(
-                "❌ Мастер-сессия не найдена. Обратитесь к администратору.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+        await message.reply(
+            "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
+            reply_markup=get_auth_keyboard()
+        )
+        await start_authorization(user_id, message)
         return
     
     channels = load_channels()
@@ -556,15 +578,14 @@ async def show_help(message: types.Message):
         "❓ Помощь\n\n"
         "📋 Мои каналы - посмотреть добавленные каналы\n"
         "➕ Добавить канал - добавить новый канал по ссылке\n"
-        "🔍 Поиск по словам - найти посты по ключевым словам\n"
-        "🔄 Собрать всё - получить все посты\n"
+        "🔍 Поиск - найти посты по ключевым словам\n"
         "⏹️ Стоп - остановить формирование отчета\n\n"
         "После выбора периода появится выбор:\n"
         "🖼️ С картинками - сохранить изображения в отчет\n"
         "📝 Только текст - только текст, без картинок\n\n"
         "Как удалить канал:\n"
         "1. Нажми '📋 Мои каналы'\n"
-        "2. Нажми на название канала в списке\n\n"
+        "2. Нажми на ❌ Удалить рядом с каналом\n\n"
         "Команды:\n"
         "/debug - диагностика\n"
         "/checksession - проверка сессии"
@@ -573,6 +594,7 @@ async def show_help(message: types.Message):
     if is_admin(user_id):
         help_text += (
             "\n\n👑 Команды администратора:\n"
+            "🔄 Собрать всё - получить все посты без фильтра\n"
             "🔄 Сменить аккаунт - авторизоваться под другим номером\n"
             "🚪 Разлогиниться - выйти из аккаунта\n"
             "👤 Мой аккаунт - информация о текущем аккаунте\n"
@@ -580,6 +602,23 @@ async def show_help(message: types.Message):
         )
     
     await message.reply(help_text, reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "⏹️ Стоп")
+async def stop_process(message: types.Message):
+    """Останавливает текущий процесс сбора"""
+    user_id = message.from_user.id
+    
+    if user_id in stop_flags:
+        stop_flags[user_id] = True
+        await message.reply(
+            "⏹️ Отправлен сигнал остановки...",
+            reply_markup=get_main_keyboard(user_id)
+        )
+    else:
+        await message.reply(
+            "Нет активного процесса для остановки.",
+            reply_markup=get_main_keyboard(user_id)
+        )
 
 @dp.message_handler(lambda message: message.text == "❌ Отменить авторизацию")
 async def cancel_auth(message: types.Message):
@@ -664,7 +703,8 @@ async def process_image_option(message: types.Message):
     save_images = (option == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    if 'keywords' in user_data[user_id]:
+    if 'keywords' in user_data[user_id] and user_data[user_id]['keywords'] == 'все':
+        # Для "Собрать всё" сразу запускаем сбор
         channels = load_channels()
         user_data[user_id]['channels'] = channels
         user_data[user_id]['state'] = 'collecting'
@@ -691,6 +731,7 @@ async def process_image_option(message: types.Message):
         
         await collect_and_send_report(user_id)
     else:
+        # Для поиска запрашиваем ключевые слова
         await message.reply(
             f"🔍 Введи ключевые слова для поиска\n\n"
             f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
@@ -872,7 +913,7 @@ async def process_code(message: types.Message):
             f"Username: @{me.username}\n"
             f"Телефон: {phone}\n\n"
             f"Теперь все пользователи могут пользоваться ботом.\n"
-            f"Нажми '🔍 Поиск по словам' или '🔄 Собрать всё'",
+            f"Нажми '🔍 Поиск' или '🔄 Собрать всё'",
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(user_id)
         )
@@ -957,7 +998,7 @@ async def process_password(message: types.Message):
             f"Мастер-аккаунт: {me.first_name}\n"
             f"Username: @{me.username}\n\n"
             f"Теперь все пользователи могут пользоваться ботом.\n"
-            f"Нажми '🔍 Поиск по словам' или '🔄 Собрать всё'",
+            f"Нажми '🔍 Поиск' или '🔄 Собрать всё'",
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(user_id)
         )
@@ -1197,6 +1238,7 @@ async def collect_and_send_report(user_id):
         total_posts = 0
         processed_channels = 0
         stopped_early = False
+        channels_with_posts = 0  # Счетчик каналов, в которых найдены посты
         
         now = datetime.now().astimezone()
         start_time = now - timedelta(hours=period_hours)
@@ -1216,11 +1258,8 @@ async def collect_and_send_report(user_id):
             try:
                 entity = await client.get_entity(channel['url'])
                 
-                doc.add_heading(f"Канал: {channel['name']}", level=1)
-                doc.add_paragraph(f"Ссылка: {channel['url']}")
-                doc.add_paragraph()
-                
                 posts_count = 0
+                channel_posts = []  # Временное хранилище для постов канала
                 
                 async for message in client.iter_messages(entity, offset_date=now, reverse=False):
                     if posts_count % 5 == 0 and stop_flags.get(user_id, False):
@@ -1244,6 +1283,23 @@ async def collect_and_send_report(user_id):
                             should_include = True
                     
                     if should_include:
+                        # Сохраняем пост во временное хранилище
+                        channel_posts.append(message)
+                        posts_count += 1
+                        total_posts += 1
+                        
+                        if posts_count % 20 == 0:
+                            await bot.send_message(user_id, f"📊 Найдено {posts_count} постов в канале {channel['name']}...")
+                
+                # Если есть посты, добавляем информацию о канале и сами посты
+                if posts_count > 0:
+                    channels_with_posts += 1
+                    doc.add_heading(f"Канал: {channel['name']}", level=1)
+                    doc.add_paragraph(f"Ссылка: {channel['url']}")
+                    doc.add_paragraph()
+                    
+                    # Добавляем все сохраненные посты
+                    for message in channel_posts:
                         p = doc.add_paragraph()
                         
                         display_date = message.date
@@ -1348,19 +1404,16 @@ async def collect_and_send_report(user_id):
                                 pass
                         
                         doc.add_paragraph()
-                        posts_count += 1
-                        total_posts += 1
-                        
-                        if posts_count % 20 == 0:
-                            await bot.send_message(user_id, f"📊 Найдено {posts_count} постов в канале {channel['name']}...")
+                    
+                    doc.add_paragraph(f"✅ Найдено постов: {posts_count}")
+                    doc.add_page_break()
+                else:
+                    await bot.send_message(user_id, f"ℹ️ В канале {channel['name']} не найдено постов за выбранный период")
                 
                 if stop_flags.get(user_id, False):
                     stopped_early = True
                     await bot.send_message(user_id, f"⏹️ Анализ канала {channel['name']} прерван.")
                     break
-                
-                doc.add_paragraph(f"✅ Найдено постов: {posts_count}")
-                doc.add_page_break()
                 
             except FloodWaitError as e:
                 wait_time = e.seconds
@@ -1378,6 +1431,7 @@ async def collect_and_send_report(user_id):
         
         doc.add_heading('Итоговая статистика', level=1)
         doc.add_paragraph(f"Всего обработано каналов: {processed_channels}/{len(channels)}")
+        doc.add_paragraph(f"Каналов с найденными постами: {channels_with_posts}")
         doc.add_paragraph(f"Всего найдено постов: {total_posts}")
         doc.add_paragraph(f"Период: последние {period_display}")
         doc.add_paragraph(f"Начало периода: {start_time.strftime('%d.%m.%Y %H:%M')}")
@@ -1385,13 +1439,29 @@ async def collect_and_send_report(user_id):
         if stopped_early:
             doc.add_paragraph("⚠️ Отчет был остановлен досрочно по запросу пользователя")
         
+        # Проверяем, есть ли вообще посты
+        if total_posts == 0:
+            await bot.send_message(
+                user_id, 
+                f"📭 Поиск завершен\n\n"
+                f"За период {period_display} не найдено постов, соответствующих запросу: {keywords}\n"
+                f"Проверено каналов: {len(channels)}",
+                reply_markup=get_main_keyboard(user_id)
+            )
+            
+            if user_id in user_data:
+                del user_data[user_id]
+            
+            await client.disconnect()
+            return
+        
         output_file = f"report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
         doc.save(output_file)
         
         with open(output_file, 'rb') as f:
             caption = f"✅ Отчет готов!\n\n"
             caption += f"📊 Найдено постов: {total_posts}\n"
-            caption += f"📁 Каналов: {processed_channels}/{len(channels)}\n"
+            caption += f"📁 Каналов с постами: {channels_with_posts}/{processed_channels}\n"
             caption += f"🔍 Ключевые слова: {keywords}\n"
             caption += f"⏱ Период: {period_display}\n"
             caption += f"🖼️ Формат: {'с картинками' if save_images else 'только текст'}\n"
@@ -1465,9 +1535,14 @@ if __name__ == '__main__':
     MASTER_SESSION = load_master_session()
     
     print("🤖 Бот запускается...")
+    print(f"👑 Администратор ID: {ADMIN_ID}")
+    print(f"📁 Каналов сохранено: {len(load_channels())}")
     
-    # Самый простой способ запуска
+    if MASTER_SESSION:
+        print("✅ Мастер-сессия загружена")
+    else:
+        print("⚠️ Мастер-сессия не найдена. Администратору нужно авторизоваться при первом использовании.")
+    
+    # Запускаем бота
     from aiogram import executor
     executor.start_polling(dp, skip_updates=True)
-
-
