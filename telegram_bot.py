@@ -5,6 +5,8 @@ import os
 import json
 import re
 import time
+import sys
+import signal
 from PIL import Image
 
 from aiogram import Bot, Dispatcher, types
@@ -42,6 +44,14 @@ ADMIN_ID = 5224743551
 # Создаем папки, если их нет
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
+
+# ========== ПРЕДОТВРАЩЕНИЕ КОНФЛИКТОВ ==========
+def signal_handler(sig, frame):
+    print('Остановка бота...')
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
 bot = Bot(token=API_TOKEN)
@@ -295,24 +305,6 @@ async def cmd_start(message: types.Message):
     
     await message.reply(welcome_text, reply_markup=get_main_keyboard(user_id))
 
-@dp.message_handler(lambda message: message.text == "⏹️ Стоп")
-async def cmd_stop(message: types.Message):
-    """Остановка формирования отчета (доступно всем)"""
-    user_id = message.from_user.id
-    
-    if user_id in stop_flags:
-        stop_flags[user_id] = True
-        await message.reply(
-            "⏹️ Команда на остановку получена!\n"
-            "Формирование отчета будет остановлено после завершения текущего канала.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    else:
-        await message.reply(
-            "⏹️ Нет активного процесса формирования отчета.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-
 @dp.message_handler(commands=['reset'])
 async def cmd_reset(message: types.Message):
     """Сброс сессии и авторизации (только для админа)"""
@@ -349,144 +341,12 @@ async def cmd_reset(message: types.Message):
         reply_markup=get_main_keyboard(user_id)
     )
 
-@dp.message_handler(lambda message: message.text == "👤 Мой аккаунт")
-async def cmd_myaccount(message: types.Message):
-    """Показать текущий аккаунт (только для админа)"""
-    user_id = message.from_user.id
-    
-    if not is_admin(user_id):
-        await message.reply("❌ Эта функция доступна только администратору.")
-        return
-    
-    global MASTER_SESSION
-    if not MASTER_SESSION:
-        MASTER_SESSION = load_master_session()
-    
-    if not MASTER_SESSION:
-        await message.reply(
-            "❌ Мастер-сессия не найдена.\n\n"
-            "Нажми '🔍 Поиск по словам' для авторизации.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-        return
-    
-    try:
-        client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
-        await client.connect()
-        
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            
-            session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
-            session_time = datetime.fromtimestamp(os.path.getmtime(session_file)) if os.path.exists(session_file) else None
-            
-            text = f"👑 *Мастер-аккаунт*\n\n"
-            text += f"Имя: {me.first_name}\n"
-            text += f"Username: @{me.username}\n"
-            text += f"ID: {me.id}\n"
-            if session_time:
-                text += f"\n📅 Сессия создана: {session_time.strftime('%d.%m.%Y %H:%M')}"
-            
-            await message.reply(text, parse_mode='Markdown')
-        else:
-            await message.reply("❌ Сессия есть, но не активна. Нужно авторизоваться заново.")
-            remove_master_session()
-        
-        await client.disconnect()
-    except Exception as e:
-        await message.reply(f"❌ Ошибка: {str(e)}")
-
-@dp.message_handler(lambda message: message.text == "🚪 Разлогиниться")
-async def cmd_logout(message: types.Message):
-    """Разлогиниться - выйти из аккаунта (только для админа)"""
-    user_id = message.from_user.id
-    
-    if not is_admin(user_id):
-        await message.reply("❌ Эта функция доступна только администратору.")
-        return
-    
-    # Останавливаем текущий процесс если есть
-    if user_id in stop_flags:
-        stop_flags[user_id] = True
-    
-    # Закрываем все клиенты для админа
-    if user_id in auth_data and 'client' in auth_data[user_id]:
-        try:
-            await auth_data[user_id]['client'].disconnect()
-        except:
-            pass
-    
-    # Удаляем мастер-сессию
-    if remove_master_session():
-        session_deleted = True
-    else:
-        session_deleted = False
-    
-    # Очищаем временные файлы
-    cleanup_temp_files(user_id)
-    
-    # Очищаем данные авторизации
-    if user_id in auth_data:
-        del auth_data[user_id]
-    
-    if session_deleted:
-        await message.reply(
-            "🚪 Вы успешно вышли из мастер-аккаунта!\n\n"
-            "Теперь можете авторизоваться под другим номером.\n"
-            "Нажми '🔍 Поиск по словам' для новой авторизации.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-    else:
-        await message.reply(
-            "✅ Мастер-аккаунт не был авторизован.",
-            reply_markup=get_main_keyboard(user_id)
-        )
-
-@dp.message_handler(lambda message: message.text == "🔄 Сменить аккаунт")
-async def cmd_change_account(message: types.Message):
-    """Смена аккаунта - полная переавторизация (только для админа)"""
-    user_id = message.from_user.id
-    
-    if not is_admin(user_id):
-        await message.reply("❌ Эта функция доступна только администратору.")
-        return
-    
-    # Останавливаем текущий процесс если есть
-    if user_id in stop_flags:
-        stop_flags[user_id] = True
-    
-    # Закрываем все клиенты для админа
-    if user_id in auth_data and 'client' in auth_data[user_id]:
-        try:
-            await auth_data[user_id]['client'].disconnect()
-        except:
-            pass
-    
-    # Удаляем мастер-сессию
-    remove_master_session()
-    
-    # Очищаем временные файлы
-    cleanup_temp_files(user_id)
-    
-    # Очищаем данные авторизации
-    if user_id in auth_data:
-        del auth_data[user_id]
-    
-    await message.reply(
-        "🔄 *Смена аккаунта*\n\n"
-        "Старая сессия удалена. Теперь можете авторизоваться под другим номером.\n\n"
-        "Нажми '🔍 Поиск по словам' для новой авторизации.",
-        parse_mode='Markdown',
-        reply_markup=get_main_keyboard(user_id)
-    )
-
 @dp.message_handler(commands=['debug'])
 async def cmd_debug(message: types.Message):
-    """Отладка - показать состояние (доступно всем, но меньше информации для обычных пользователей)"""
+    """Отладка - показать состояние"""
     user_id = message.from_user.id
     
     if is_admin(user_id):
-        # Подробная информация для админа
         session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
         session_exists = os.path.exists(session_file)
         
@@ -505,7 +365,6 @@ async def cmd_debug(message: types.Message):
             f"🆔 User ID: {user_id}"
         )
     else:
-        # Минимальная информация для обычных пользователей
         is_stopping = user_id in stop_flags and stop_flags[user_id]
         debug_text = (
             f"🔍 Отладка\n\n"
@@ -517,7 +376,7 @@ async def cmd_debug(message: types.Message):
 
 @dp.message_handler(commands=['checksession'])
 async def cmd_checksession(message: types.Message):
-    """Проверка сессии (доступно всем, но для обычных пользователей просто проверяет наличие)"""
+    """Проверка сессии"""
     user_id = message.from_user.id
     
     global MASTER_SESSION
@@ -529,7 +388,6 @@ async def cmd_checksession(message: types.Message):
         return
     
     if is_admin(user_id):
-        # Для админа - полная проверка
         await message.reply("🔍 Проверяю мастер-сессию...")
         
         try:
@@ -545,7 +403,6 @@ async def cmd_checksession(message: types.Message):
                     f"ID: {me.id}"
                 )
                 
-                # Сохраняем обновленную сессию
                 new_session_string = client.session.save()
                 save_session_string(new_session_string)
             else:
@@ -557,12 +414,11 @@ async def cmd_checksession(message: types.Message):
             await message.reply(f"❌ Ошибка при проверке: {str(e)}")
             remove_master_session()
     else:
-        # Для обычных пользователей - просто подтверждение
         await message.reply("✅ Мастер-сессия активна. Бот готов к работе.")
 
 @dp.message_handler(lambda message: message.text == "📋 Мои каналы")
 async def show_channels(message: types.Message):
-    """Показывает список сохраненных каналов (доступно всем)"""
+    """Показывает список сохраненных каналов"""
     user_id = message.from_user.id
     
     channels = load_channels()
@@ -575,7 +431,6 @@ async def show_channels(message: types.Message):
         )
         return
     
-    # Создаем клавиатуру с каналами
     keyboard = InlineKeyboardMarkup(row_width=1)
     for i, channel in enumerate(channels):
         btn_text = f"{channel['name']}"
@@ -595,7 +450,7 @@ async def show_channels(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "➕ Добавить канал")
 async def add_channel_prompt(message: types.Message):
-    """Запрашивает ссылку на канал (доступно всем)"""
+    """Запрашивает ссылку на канал"""
     user_id = message.from_user.id
     
     await message.reply(
@@ -611,24 +466,21 @@ async def add_channel_prompt(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "🔍 Поиск по словам")
 async def search_by_keywords(message: types.Message):
-    """Поиск по ключевым словам (доступно всем)"""
+    """Поиск по ключевым словам"""
     user_id = message.from_user.id
     
-    # Проверяем наличие мастер-сессии
     global MASTER_SESSION
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
     
     if not MASTER_SESSION:
         if is_admin(user_id):
-            # Для админа - начинаем авторизацию
             await message.reply(
                 "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
                 reply_markup=get_auth_keyboard()
             )
             await start_authorization(user_id, message)
         else:
-            # Для обычных пользователей - ошибка
             await message.reply(
                 "❌ Мастер-сессия не найдена. Обратитесь к администратору.",
                 reply_markup=get_main_keyboard(user_id)
@@ -644,7 +496,6 @@ async def search_by_keywords(message: types.Message):
         )
         return
     
-    # Запрашиваем период
     await message.reply(
         "⏱ Выбери период времени\n\n"
         "За какой период собирать посты?",
@@ -655,24 +506,21 @@ async def search_by_keywords(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "🔄 Собрать всё")
 async def collect_all(message: types.Message):
-    """Собрать все посты без фильтра (доступно всем)"""
+    """Собрать все посты без фильтра"""
     user_id = message.from_user.id
     
-    # Проверяем наличие мастер-сессии
     global MASTER_SESSION
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
     
     if not MASTER_SESSION:
         if is_admin(user_id):
-            # Для админа - начинаем авторизацию
             await message.reply(
                 "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
                 reply_markup=get_auth_keyboard()
             )
             await start_authorization(user_id, message)
         else:
-            # Для обычных пользователей - ошибка
             await message.reply(
                 "❌ Мастер-сессия не найдена. Обратитесь к администратору.",
                 reply_markup=get_main_keyboard(user_id)
@@ -688,7 +536,6 @@ async def collect_all(message: types.Message):
         )
         return
     
-    # Запрашиваем период
     await message.reply(
         "⏱ Выбери период времени\n\n"
         "За какой период собирать все посты?",
@@ -702,7 +549,7 @@ async def collect_all(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "❓ Помощь")
 async def show_help(message: types.Message):
-    """Показывает справку (доступно всем)"""
+    """Показывает справку"""
     user_id = message.from_user.id
     
     help_text = (
@@ -723,7 +570,6 @@ async def show_help(message: types.Message):
         "/checksession - проверка сессии"
     )
     
-    # Добавляем информацию для админа
     if is_admin(user_id):
         help_text += (
             "\n\n👑 Команды администратора:\n"
@@ -758,11 +604,10 @@ async def cancel_auth(message: types.Message):
 
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_period')
 async def process_period(message: types.Message):
-    """Обработка выбора периода (доступно всем)"""
+    """Обработка выбора периода"""
     user_id = message.from_user.id
     period_text = message.text
     
-    # Определяем период в часах
     period_hours = 0
     
     if period_text == "🕐 1 час":
@@ -774,9 +619,9 @@ async def process_period(message: types.Message):
     elif period_text == "📅 24 часа":
         period_hours = 24
     elif period_text == "📆 3 дня":
-        period_hours = 72  # 3 * 24
+        period_hours = 72
     elif period_text == "📆 7 дней":
-        period_hours = 168  # 7 * 24
+        period_hours = 168
     elif period_text == "◀️ Назад в меню":
         await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
         del user_data[user_id]
@@ -788,10 +633,8 @@ async def process_period(message: types.Message):
         )
         return
     
-    # Сохраняем период
     user_data[user_id]['period_hours'] = period_hours
     
-    # Запрашиваем выбор - с картинками или без
     await message.reply(
         "🖼️ Выбери формат отчета:\n\n"
         "• С картинками - будут сохранены все изображения\n"
@@ -818,13 +661,10 @@ async def process_image_option(message: types.Message):
         )
         return
     
-    # Сохраняем выбор
     save_images = (option == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    # Проверяем, есть ли уже ключевые слова
     if 'keywords' in user_data[user_id]:
-        # Это режим "Собрать всё" - запускаем сразу
         channels = load_channels()
         user_data[user_id]['channels'] = channels
         user_data[user_id]['state'] = 'collecting'
@@ -851,7 +691,6 @@ async def process_image_option(message: types.Message):
         
         await collect_and_send_report(user_id)
     else:
-        # Это режим "Поиск по словам" - запрашиваем ключевые слова
         await message.reply(
             f"🔍 Введи ключевые слова для поиска\n\n"
             f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
@@ -863,23 +702,20 @@ async def process_image_option(message: types.Message):
 
 # ========== ФУНКЦИИ АВТОРИЗАЦИИ (только для админа) ==========
 async def start_authorization(user_id, message):
-    """Начинает процесс авторизации (только для админа)"""
+    """Начинает процесс авторизации"""
     if not is_admin(user_id):
         return
     
     try:
-        # Закрываем старые соединения
         if user_id in auth_data and 'client' in auth_data[user_id]:
             try:
                 await auth_data[user_id]['client'].disconnect()
             except:
                 pass
         
-        # Создаём нового клиента с StringSession
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         
-        # Сохраняем клиент
         auth_data[user_id] = {
             'client': client,
             'state': 'waiting_phone'
@@ -899,23 +735,20 @@ async def start_authorization(user_id, message):
             del auth_data[user_id]
 
 async def start_authorization_without_message(user_id):
-    """Начинает процесс авторизации без объекта message (только для админа)"""
+    """Начинает процесс авторизации без объекта message"""
     if not is_admin(user_id):
         return
     
     try:
-        # Закрываем старые соединения
         if user_id in auth_data and 'client' in auth_data[user_id]:
             try:
                 await auth_data[user_id]['client'].disconnect()
             except:
                 pass
         
-        # Создаём нового клиента с StringSession
         client = TelegramClient(StringSession(), API_ID, API_HASH)
         await client.connect()
         
-        # Сохраняем клиент
         auth_data[user_id] = {
             'client': client,
             'state': 'waiting_phone'
@@ -937,7 +770,7 @@ async def start_authorization_without_message(user_id):
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_phone')
 async def process_phone(message: types.Message):
-    """Обработка ввода номера телефона (только для админа)"""
+    """Обработка ввода номера телефона"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
@@ -945,23 +778,18 @@ async def process_phone(message: types.Message):
     
     phone = message.text.strip()
     
-    # Проверяем отмену
     if phone == "❌ Отменить авторизацию":
         await cancel_auth(message)
         return
     
-    # Очищаем номер от лишних символов
     phone = re.sub(r'[^\d+]', '', phone)
     
     status_msg = await message.reply("📲 Отправляю запрос на код подтверждения...")
     
     try:
         client = auth_data[user_id]['client']
-        
-        # Отправляем запрос кода
         result = await client.send_code_request(phone)
         
-        # Сохраняем данные
         auth_data[user_id]['phone'] = phone
         auth_data[user_id]['phone_code_hash'] = result.phone_code_hash
         auth_data[user_id]['state'] = 'waiting_code'
@@ -996,7 +824,6 @@ async def process_phone(message: types.Message):
                 "Попробуй снова:",
                 reply_markup=get_auth_keyboard()
             )
-            # Оставляем в состоянии waiting_phone для повторного ввода
             return
         else:
             await message.reply(
@@ -1004,14 +831,13 @@ async def process_phone(message: types.Message):
                 reply_markup=get_main_keyboard(user_id)
             )
         
-        # Очищаем данные при ошибке
         await client.disconnect()
         if user_id in auth_data:
             del auth_data[user_id]
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_code')
 async def process_code(message: types.Message):
-    """Обработка ввода кода подтверждения (только для админа)"""
+    """Обработка ввода кода подтверждения"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
@@ -1019,12 +845,10 @@ async def process_code(message: types.Message):
     
     code = message.text.strip()
     
-    # Проверяем отмену
     if code == "❌ Отменить авторизацию":
         await cancel_auth(message)
         return
     
-    # Удаляем все не-цифры из кода
     code = re.sub(r'\D', '', code)
     
     status_msg = await message.reply(f"🔐 Проверяю код...")
@@ -1033,21 +857,15 @@ async def process_code(message: types.Message):
         client = auth_data[user_id]['client']
         phone = auth_data[user_id]['phone']
         
-        # Пробуем войти с кодом
         await client.sign_in(phone, code)
         
         await status_msg.delete()
         
-        # Получаем строку сессии
         session_string = client.session.save()
-        
-        # Сохраняем мастер-сессию
         save_session_string(session_string)
         
-        # Проверяем, что авторизация реально работает
         me = await client.get_me()
         
-        # Авторизация успешна!
         await message.reply(
             f"✅ *Авторизация успешна!*\n\n"
             f"Мастер-аккаунт: {me.first_name}\n"
@@ -1059,13 +877,11 @@ async def process_code(message: types.Message):
             reply_markup=get_main_keyboard(user_id)
         )
         
-        # Очищаем временные данные
         if user_id in auth_data:
             del auth_data[user_id]
         
     except SessionPasswordNeededError:
         await status_msg.delete()
-        # Если включена двухфакторка
         auth_data[user_id]['state'] = 'waiting_password'
         await message.reply(
             "🔐 Требуется пароль двухфакторной аутентификации\n\n"
@@ -1079,7 +895,6 @@ async def process_code(message: types.Message):
             "Нажми '🔄 Сменить аккаунт' и попробуй снова, или введи номер заново:",
             reply_markup=get_auth_keyboard()
         )
-        # Возвращаемся к вводу номера
         auth_data[user_id]['state'] = 'waiting_phone'
     except PhoneCodeInvalidError:
         await status_msg.delete()
@@ -1088,7 +903,6 @@ async def process_code(message: types.Message):
             "Попробуй ввести ещё раз (только цифры):",
             reply_markup=get_auth_keyboard()
         )
-        # Оставляем в состоянии waiting_code для повторного ввода
     except Exception as e:
         await status_msg.delete()
         error_text = str(e)
@@ -1117,7 +931,7 @@ async def process_code(message: types.Message):
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_password')
 async def process_password(message: types.Message):
-    """Обработка ввода пароля двухфакторки (только для админа)"""
+    """Обработка ввода пароля двухфакторки"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
@@ -1125,7 +939,6 @@ async def process_password(message: types.Message):
     
     password = message.text.strip()
     
-    # Проверяем отмену
     if password == "❌ Отменить авторизацию":
         await cancel_auth(message)
         return
@@ -1134,13 +947,9 @@ async def process_password(message: types.Message):
         client = auth_data[user_id]['client']
         await client.sign_in(password=password)
         
-        # Получаем строку сессии
         session_string = client.session.save()
-        
-        # Сохраняем мастер-сессию
         save_session_string(session_string)
         
-        # Проверяем авторизацию
         me = await client.get_me()
         
         await message.reply(
@@ -1162,28 +971,24 @@ async def process_password(message: types.Message):
             f"Попробуй ещё раз:",
             reply_markup=get_auth_keyboard()
         )
-        # Оставляем в состоянии waiting_password для повторного ввода
 
 # ========== ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ ==========
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_channel_link')
 async def process_channel_link(message: types.Message):
-    """Обрабатывает добавление канала по ссылке (доступно всем)"""
+    """Обрабатывает добавление канала по ссылке"""
     try:
         user_id = message.from_user.id
         link = message.text.strip()
         
-        # Очищаем ссылку
         link = link.replace('@', '')
         if not link.startswith('http'):
             if '/' not in link:
                 link = f"https://t.me/{link}"
         
-        # Извлекаем имя канала
         channel_name = extract_channel_name(link)
         if not channel_name:
             channel_name = link.split('/')[-1]
         
-        # Проверяем доступность канала (используем мастер-сессию)
         status_msg = await message.reply("🔄 Проверяю доступность канала...")
         
         try:
@@ -1200,15 +1005,12 @@ async def process_channel_link(message: types.Message):
                 await client.disconnect()
             
         except Exception as e:
-            # Если не получилось проверить, всё равно добавляем
             pass
         
         await status_msg.delete()
         
-        # Загружаем существующие каналы
         channels = load_channels()
         
-        # Проверяем, нет ли уже такого канала
         for ch in channels:
             if ch['url'] == link or ch['name'].lower() == channel_name.lower():
                 await message.reply(
@@ -1219,11 +1021,9 @@ async def process_channel_link(message: types.Message):
                 del user_data[user_id]
                 return
         
-        # Добавляем новый канал
         channels.append({'name': channel_name, 'url': link})
         save_channels(channels)
         
-        # Очищаем состояние
         del user_data[user_id]
         
         await message.reply(
@@ -1239,15 +1039,14 @@ async def process_channel_link(message: types.Message):
 
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_keywords')
 async def process_keywords(message: types.Message):
-    """Обрабатывает ключевые слова и запускает сбор (доступно всем)"""
+    """Обрабатывает ключевые слова и запускает сбор"""
     keywords = message.text.strip()
     user_id = message.from_user.id
     
     channels = load_channels()
     
-    # Получаем период и выбор изображений из данных
     period_hours = user_data[user_id].get('period_hours', 168)
-    save_images = user_data[user_id].get('save_images', True)  # По умолчанию True
+    save_images = user_data[user_id].get('save_images', True)
     
     user_data[user_id] = {
         'state': 'collecting',
@@ -1257,7 +1056,6 @@ async def process_keywords(message: types.Message):
         'save_images': save_images
     }
     
-    # Определяем текстовое представление периода
     if period_hours == 1:
         period_text = "1 час"
     elif period_hours == 3:
@@ -1287,7 +1085,7 @@ async def process_keywords(message: types.Message):
 # ========== ОБРАБОТЧИКИ ИНЛАЙН-КНОПОК ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
 async def process_delete_callback(callback_query: types.CallbackQuery):
-    """Обрабатывает удаление канала (доступно всем)"""
+    """Обрабатывает удаление канала"""
     await bot.answer_callback_query(callback_query.id)
     
     user_id = callback_query.from_user.id
@@ -1296,7 +1094,6 @@ async def process_delete_callback(callback_query: types.CallbackQuery):
     channels = load_channels()
     
     if data == "delete_all":
-        # Удаляем все каналы
         save_channels([])
         await bot.send_message(
             user_id,
@@ -1305,7 +1102,6 @@ async def process_delete_callback(callback_query: types.CallbackQuery):
         )
         return
     
-    # Удаляем конкретный канал
     index = int(data.split('_')[1])
     if index < len(channels):
         deleted = channels.pop(index)
@@ -1321,7 +1117,7 @@ async def process_delete_callback(callback_query: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == 'back_to_main')
 async def process_back_callback(callback_query: types.CallbackQuery):
-    """Возврат в главное меню (доступно всем)"""
+    """Возврат в главное меню"""
     await bot.answer_callback_query(callback_query.id)
     
     user_id = callback_query.from_user.id
@@ -1334,19 +1130,16 @@ async def process_back_callback(callback_query: types.CallbackQuery):
 
 # ========== ФУНКЦИЯ СБОРА И ОТПРАВКИ ОТЧЕТА ==========
 async def collect_and_send_report(user_id):
-    """Сбор данных и отправка отчёта (использует мастер-сессию)"""
+    """Сбор данных и отправка отчёта"""
     client = None
     try:
-        # Устанавливаем флаг остановки в False
         stop_flags[user_id] = False
         
-        # Получаем данные пользователя
         keywords = user_data[user_id]['keywords']
         channels = user_data[user_id]['channels']
         period_hours = user_data[user_id].get('period_hours', 168)
         save_images = user_data[user_id].get('save_images', True)
         
-        # Определяем текстовое представление периода
         if period_hours == 1:
             period_display = "1 час"
         elif period_hours == 3:
@@ -1362,7 +1155,6 @@ async def collect_and_send_report(user_id):
         
         await bot.send_message(user_id, "🔄 Подключаюсь к Telegram...")
         
-        # Загружаем мастер-сессию
         global MASTER_SESSION
         if not MASTER_SESSION:
             MASTER_SESSION = load_master_session()
@@ -1374,11 +1166,9 @@ async def collect_and_send_report(user_id):
             )
             return
         
-        # Создаём клиента с мастер-сессией
         client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
         await client.connect()
         
-        # Проверяем авторизацию
         if not await client.is_user_authorized():
             await bot.send_message(user_id, 
                 "❌ Мастер-сессия не активна. Администратору нужно авторизоваться заново.",
@@ -1388,21 +1178,17 @@ async def collect_and_send_report(user_id):
             remove_master_session()
             return
         
-        # Обновляем сессию (она могла измениться)
         new_session_string = client.session.save()
         if new_session_string != MASTER_SESSION:
             save_session_string(new_session_string)
         
         await bot.send_message(user_id, f"✅ Подключение установлено! Начинаю сбор...")
         
-        # Создаём Word-документ
         doc = Document()
         
-        # Заголовок
         title = doc.add_heading('Отчёт по Telegram-каналам', 0)
         title.alignment = 1
         
-        # Дата
         doc.add_paragraph(f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: последние {period_display}")
@@ -1412,13 +1198,10 @@ async def collect_and_send_report(user_id):
         processed_channels = 0
         stopped_early = False
         
-        # Получаем текущее время с часовым поясом
         now = datetime.now().astimezone()
         start_time = now - timedelta(hours=period_hours)
         
-        # Собираем посты по каждому каналу
         for channel in channels:
-            # Проверяем, не нужно ли остановиться
             if stop_flags.get(user_id, False):
                 stopped_early = True
                 await bot.send_message(user_id, 
@@ -1493,7 +1276,6 @@ async def collect_and_send_report(user_id):
                                 text = text[:5000] + "..."
                             p.add_run(text)
                         
-                        # Сохраняем изображения только если пользователь выбрал эту опцию
                         if save_images and message.media:
                             media_info = []
                             if hasattr(message.media, 'photo'):
@@ -1532,7 +1314,6 @@ async def collect_and_send_report(user_id):
                             if media_info and not any('(сохранено)' in info for info in media_info):
                                 p.add_run(f"\n📎 Медиа: {', '.join(media_info)}")
                         elif message.media and not save_images:
-                            # Если изображения не сохраняем, просто указываем тип медиа
                             media_info = []
                             if hasattr(message.media, 'photo'):
                                 media_info.append("📷 Фото")
@@ -1595,7 +1376,6 @@ async def collect_and_send_report(user_id):
                 doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']}")
                 doc.add_page_break()
         
-        # Добавляем итоговую статистику
         doc.add_heading('Итоговая статистика', level=1)
         doc.add_paragraph(f"Всего обработано каналов: {processed_channels}/{len(channels)}")
         doc.add_paragraph(f"Всего найдено постов: {total_posts}")
@@ -1605,11 +1385,9 @@ async def collect_and_send_report(user_id):
         if stopped_early:
             doc.add_paragraph("⚠️ Отчет был остановлен досрочно по запросу пользователя")
         
-        # Сохраняем документ
         output_file = f"report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
         doc.save(output_file)
         
-        # Отправляем пользователю
         with open(output_file, 'rb') as f:
             caption = f"✅ Отчет готов!\n\n"
             caption += f"📊 Найдено постов: {total_posts}\n"
@@ -1626,21 +1404,16 @@ async def collect_and_send_report(user_id):
                 caption=caption
             )
         
-        # Удаляем временный файл отчета
         if os.path.exists(output_file):
             os.remove(output_file)
         
-        # Очищаем временные файлы изображений
         cleanup_temp_files(user_id)
         
-        # Очищаем данные пользователя
         if user_id in user_data:
             del user_data[user_id]
         
-        # Отключаем клиент
         await client.disconnect()
         
-        # Сбрасываем флаг остановки
         if user_id in stop_flags:
             del stop_flags[user_id]
         
@@ -1665,7 +1438,6 @@ async def handle_unknown(message: types.Message):
     """Обработка неизвестных команд"""
     user_id = message.from_user.id
     
-    # Проверяем, может это номер телефона или код для авторизации (только для админа)
     if is_admin(user_id) and user_id in auth_data:
         if auth_data[user_id].get('state') == 'waiting_phone':
             await process_phone(message)
@@ -1677,7 +1449,6 @@ async def handle_unknown(message: types.Message):
             await process_password(message)
             return
     
-    # Проверяем, может это ссылка на канал (для всех)
     if message.text and ('t.me/' in message.text or '@' in message.text):
         user_data[user_id] = {'state': 'waiting_channel_link'}
         await process_channel_link(message)
@@ -1694,21 +1465,22 @@ if __name__ == '__main__':
     MASTER_SESSION = load_master_session()
     
     print("🤖 Бот запущен! Нажми Ctrl+C для остановки")
-    print("📱 Кнопки управления в Telegram:")
-    print("  • 📋 Мои каналы - список каналов")
-    print("  • ➕ Добавить канал - добавить по ссылке")
-    print("  • 🔍 Поиск по словам - поиск по ключевым словам")
-    print("  • 🔄 Собрать всё - все посты")
-    print("  • ⏹️ Стоп - остановить формирование отчета")
-    print("⏱ Можно выбирать период: 1 час, 3 часа, 7 часов, 24 часа, 3 дня, 7 дней")
-    print("🖼️ Можно выбирать формат: с картинками или только текст")
-    print("👑 Администратор (ID: {ADMIN_ID}) имеет дополнительные функции")
     
-    if MASTER_SESSION:
-        print("✅ Мастер-сессия загружена. Бот готов к работе для всех пользователей!")
-    else:
-        print("⚠️ Мастер-сессия не найдена. Администратору нужно авторизоваться.")
-        print(f"   Отправьте /start и нажмите '🔍 Поиск по словам' для авторизации.")
+    # Принудительно очищаем вебхуки перед запуском
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
+    async def on_startup(dp):
+        await bot.delete_webhook()
+        await asyncio.sleep(0.5)
+        print("✅ Вебхуки очищены, бот готов к работе")
+    
+    # Запускаем с правильными параметрами
+    executor.start_polling(
+        dp, 
+        skip_updates=True, 
+        on_startup=on_startup,
+        timeout=30,
+        relax=0.1
+    )
 
-    executor.start_polling(dp, skip_updates=True, timeout=30, relax=0.1)
