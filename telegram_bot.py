@@ -1710,4 +1710,5 @@ if __name__ == '__main__':
         print("⚠️ Мастер-сессия не найдена. Администратору нужно авторизоваться.")
         print(f"   Отправьте /start и нажмите '🔍 Поиск по словам' для авторизации.")
     
-    executor.start_polling(dp, skip_updates=True)
+
+    executor.start_polling(dp, skip_updates=True, timeout=30, relax=0.1)
