@@ -1464,23 +1464,10 @@ if __name__ == '__main__':
     # Загружаем мастер-сессию при старте
     MASTER_SESSION = load_master_session()
     
-    print("🤖 Бот запущен! Нажми Ctrl+C для остановки")
+    print("🤖 Бот запускается...")
     
-    # Принудительно очищаем вебхуки перед запуском
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    async def on_startup(dp):
-        await bot.delete_webhook()
-        await asyncio.sleep(0.5)
-        print("✅ Вебхуки очищены, бот готов к работе")
-    
-    # Запускаем с правильными параметрами
-    executor.start_polling(
-        dp, 
-        skip_updates=True, 
-        on_startup=on_startup,
-        timeout=30,
-        relax=0.1
-    )
+    # Самый простой способ запуска
+    from aiogram import executor
+    executor.start_polling(dp, skip_updates=True)
+
 
