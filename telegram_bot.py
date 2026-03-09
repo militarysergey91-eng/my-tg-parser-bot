@@ -18,6 +18,8 @@ from aiogram.utils import executor
 from docx import Document
 from docx.shared import Inches, Pt, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 from telethon.sessions import StringSession
@@ -346,13 +348,42 @@ def add_image_to_doc(doc, image_path, max_width_inches=6):
             doc_width = min(max_width_inches, width / 96)
             doc_height = doc_width * aspect
             doc.add_picture(image_path, width=Cm(doc_width * 2.54))
-            caption = doc.add_paragraph()
-            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            caption.add_run(f"Изображение").italic = True
             return True
     except Exception as e:
         print(f"Ошибка добавления изображения в документ: {e}")
         return False
+
+def add_hyperlink(paragraph, text, url):
+    """Добавляет гиперссылку в параграф Word документа"""
+    # Получаем часть документа
+    part = paragraph.part
+    
+    # Создаем элемент гиперссылки
+    hyperlink = OxmlElement('w:hyperlink')
+    hyperlink.set(qn('r:id'), part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True))
+    
+    # Создаем элемент прогона
+    r = OxmlElement('w:r')
+    
+    # Создаем элемент свойств прогона
+    rPr = OxmlElement('w:rPr')
+    
+    # Создаем элемент стиля (синий, подчеркнутый для ссылки)
+    rStyle = OxmlElement('w:rStyle')
+    rStyle.set(qn('w:val'), 'Hyperlink')
+    rPr.append(rStyle)
+    
+    r.append(rPr)
+    
+    # Создаем элемент текста
+    t = OxmlElement('w:t')
+    t.text = text
+    r.append(t)
+    
+    hyperlink.append(r)
+    paragraph._p.append(hyperlink)
+    
+    return hyperlink
 
 # ========== ФУНКЦИИ ДЛЯ ПРОВЕРКИ АДМИНА ==========
 def is_admin(user_id):
@@ -374,7 +405,7 @@ def get_main_keyboard(user_id):
         KeyboardButton("⏹️ Стоп")
     )
     
-    # Кнопки только для админа (без "Мой аккаунт" и "Сменить аккаунт")
+    # Кнопки только для админа
     if is_admin(user_id):
         keyboard.add(
             KeyboardButton("🔄 Собрать всё"),
@@ -1719,100 +1750,37 @@ async def collect_and_send_report(user_id):
                                 display_date = display_date.astimezone()
                             p.add_run(f"📅 {display_date.strftime('%d.%m.%Y %H:%M')}\n").bold = True
                         
-                        stats = []
-                        if hasattr(message, 'views') and message.views:
-                            stats.append(f"👁 {message.views} просмотров")
-                        if hasattr(message, 'forwards') and message.forwards:
-                            stats.append(f"🔄 {message.forwards} репостов")
-                        
-                        if hasattr(message, 'reactions') and message.reactions:
-                            reactions_text = []
-                            for reaction in message.reactions.results:
-                                if hasattr(reaction, 'reaction'):
-                                    emoji = reaction.reaction.emoticon if hasattr(reaction.reaction, 'emoticon') else '👍'
-                                    reactions_text.append(f"{emoji} {reaction.count}")
-                            if reactions_text:
-                                stats.append(f"💬 Реакции: {' '.join(reactions_text)}")
-                        
-                        if stats:
-                            p.add_run(" | ".join(stats) + "\n")
-                        
                         if message.text:
                             text = message.text
                             if len(text) > 5000:
                                 text = text[:5000] + "..."
                             p.add_run(text)
                         
+                        # Добавляем изображения, если нужно
                         if save_images and message.media:
-                            media_info = []
                             if hasattr(message.media, 'photo'):
-                                media_info.append("📷 Фото")
                                 image_path = await download_media(message, user_id, client)
                                 if image_path:
                                     doc.add_paragraph()
-                                    if add_image_to_doc(doc, image_path):
-                                        media_info.append("(сохранено)")
+                                    add_image_to_doc(doc, image_path)
                             
-                            if hasattr(message.media, 'document'):
-                                doc_type = "📎 Документ"
+                            if hasattr(message.media, 'document') and message.media.document:
                                 if hasattr(message.media.document, 'mime_type'):
                                     mime = message.media.document.mime_type
-                                    if 'video' in mime:
-                                        doc_type = "🎥 Видео"
-                                    elif 'audio' in mime:
-                                        doc_type = "🎵 Аудио"
-                                    elif 'image' in mime:
-                                        doc_type = "🖼 Изображение"
-                                        if save_images:
-                                            image_path = await download_media(message, user_id, client)
-                                            if image_path:
-                                                doc.add_paragraph()
-                                                if add_image_to_doc(doc, image_path):
-                                                    media_info.append(f"{doc_type} (сохранено)")
-                                                else:
-                                                    media_info.append(doc_type)
-                                        else:
-                                            media_info.append(doc_type)
-                                    else:
-                                        media_info.append(doc_type)
-                                else:
-                                    media_info.append(doc_type)
-                            
-                            if media_info and not any('(сохранено)' in info for info in media_info):
-                                p.add_run(f"\n📎 Медиа: {', '.join(media_info)}")
-                        elif message.media and not save_images:
-                            media_info = []
-                            if hasattr(message.media, 'photo'):
-                                media_info.append("📷 Фото")
-                            if hasattr(message.media, 'document'):
-                                doc_type = "📎 Документ"
-                                if hasattr(message.media.document, 'mime_type'):
-                                    mime = message.media.document.mime_type
-                                    if 'video' in mime:
-                                        doc_type = "🎥 Видео"
-                                    elif 'audio' in mime:
-                                        doc_type = "🎵 Аудио"
-                                    elif 'image' in mime:
-                                        doc_type = "🖼 Изображение"
-                                media_info.append(doc_type)
-                            if media_info:
-                                p.add_run(f"\n📎 Медиа: {', '.join(media_info)}")
+                                    if 'image' in mime:
+                                        image_path = await download_media(message, user_id, client)
+                                        if image_path:
+                                            doc.add_paragraph()
+                                            add_image_to_doc(doc, image_path)
                         
+                        # Добавляем активную ссылку на пост
                         if message.id:
                             channel_username = channel['url'].split('/')[-1]
-                            p.add_run(f"\n🔗 Ссылка: https://t.me/{channel_username}/{message.id}")
-                        
-                        if hasattr(message, 'post_author') and message.post_author:
-                            p.add_run(f"\n✍️ Автор: {message.post_author}")
-                        elif hasattr(message, 'sender_id') and message.sender_id:
-                            try:
-                                sender = await client.get_entity(message.sender_id)
-                                if hasattr(sender, 'first_name') or hasattr(sender, 'last_name'):
-                                    name = f"{getattr(sender, 'first_name', '')} {getattr(sender, 'last_name', '')}".strip()
-                                    if name:
-                                        p.add_run(f"\n✍️ От: {name}")
-                            except:
-                                pass
+                            link_text = f"🔗 Ссылка на пост"
+                            link_url = f"https://t.me/{channel_username}/{message.id}"
+                            
+                            link_paragraph = doc.add_paragraph()
+                            add_hyperlink(link_paragraph, link_text, link_url)
                         
                         doc.add_paragraph()
                     
