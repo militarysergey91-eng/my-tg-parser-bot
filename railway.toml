@@ -1,0 +1,5 @@
+[build]
+builder = "NIXPACKS"
+
+[run]
+command = "python telegram_bot.py"
