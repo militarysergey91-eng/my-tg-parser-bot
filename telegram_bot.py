@@ -374,13 +374,11 @@ def get_main_keyboard(user_id):
         KeyboardButton("⏹️ Стоп")
     )
     
-    # Кнопки только для админа
+    # Кнопки только для админа (без "Мой аккаунт" и "Сменить аккаунт")
     if is_admin(user_id):
         keyboard.add(
             KeyboardButton("🔄 Собрать всё"),
-            KeyboardButton("🔄 Сменить аккаунт"),
-            KeyboardButton("🚪 Разлогиниться"),
-            KeyboardButton("👤 Мой аккаунт")
+            KeyboardButton("🚪 Разлогиниться")
         )
     
     return keyboard
@@ -442,7 +440,7 @@ async def cmd_start(message: types.Message):
         "👋 Добро пожаловать!\n\n"
         "Я бот для сбора информации из Telegram-каналов.\n\n"
         "📊 Общий список каналов доступен всем пользователям\n"
-        "✏️ Все пользователи могут добавлять и удалять каналы\n\n"
+        "✏️ Все пользователи могут добавлять каналы\n\n"
         "Как пользоваться:\n"
         "1️⃣ Нажми '➕ Добавить канал' и отправь ссылку на канал\n"
         "2️⃣ Канал добавится в общий список для всех\n"
@@ -463,9 +461,7 @@ async def cmd_start(message: types.Message):
         welcome_text += (
             "\n\n👑 Вы администратор. Доступны дополнительные функции:\n"
             "• 🔄 Собрать всё - получить все посты без фильтра\n"
-            "• 🔄 Сменить аккаунт - авторизоваться под другим номером\n"
             "• 🚪 Разлогиниться - выйти из аккаунта\n"
-            "• 👤 Мой аккаунт - информация о текущем аккаунте\n"
         )
     
     # Проверяем наличие мастер-сессии
@@ -619,16 +615,20 @@ async def show_channels(message: types.Message):
             f"📢 {channel['name']}", 
             url=channel['url']
         )
-        # Кнопка для удаления канала (доступна всем)
-        delete_button = InlineKeyboardButton(
-            f"❌ Удалить", 
-            callback_data=f"delete_{i}"
-        )
-        # Добавляем обе кнопки в один ряд
-        keyboard.row(channel_button, delete_button)
+        # Кнопка для удаления канала (только для админа)
+        if is_admin(user_id):
+            delete_button = InlineKeyboardButton(
+                f"❌ Удалить", 
+                callback_data=f"delete_{i}"
+            )
+            keyboard.row(channel_button, delete_button)
+        else:
+            keyboard.add(channel_button)
     
-    # Кнопка удаления всех каналов (доступна всем)
-    keyboard.add(InlineKeyboardButton("❌ Удалить все", callback_data="delete_all"))
+    # Кнопка удаления всех каналов (только для админа)
+    if is_admin(user_id):
+        keyboard.add(InlineKeyboardButton("❌ Удалить все", callback_data="delete_all"))
+    
     keyboard.add(InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main"))
     
     text = f"📋 Общий список каналов:\n\n"
@@ -637,7 +637,11 @@ async def show_channels(message: types.Message):
     
     text += f"\nВсего каналов: {len(channels)}\n\n"
     text += "Нажми на название канала чтобы перейти\n"
-    text += "Нажми ❌ Удалить чтобы удалить канал"
+    
+    if is_admin(user_id):
+        text += "Нажми ❌ Удалить чтобы удалить канал"
+    else:
+        text += "Только администратор может удалять каналы"
     
     await message.reply(text, reply_markup=keyboard)
 
@@ -935,9 +939,7 @@ async def show_help(message: types.Message):
         help_text += (
             "\n\n👑 Команды администратора:\n"
             "🔄 Собрать всё - получить все посты без фильтра\n"
-            "🔄 Сменить аккаунт - авторизоваться под другим номером\n"
             "🚪 Разлогиниться - выйти из аккаунта\n"
-            "👤 Мой аккаунт - информация о текущем аккаунте\n"
             "/reset - сброс авторизации"
         )
     
@@ -978,6 +980,42 @@ async def cancel_auth(message: types.Message):
     
     await message.reply(
         "❌ Авторизация отменена.",
+        reply_markup=get_main_keyboard(user_id)
+    )
+
+@dp.message_handler(lambda message: message.text == "🚪 Разлогиниться")
+async def logout(message: types.Message):
+    """Выход из аккаунта (только для админа)"""
+    user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.reply(
+            "❌ Эта функция доступна только администратору.",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
+    
+    # Останавливаем текущий процесс если есть
+    if user_id in stop_flags:
+        stop_flags[user_id] = True
+    
+    # Закрываем все клиенты для админа
+    if user_id in auth_data and 'client' in auth_data[user_id]:
+        try:
+            await auth_data[user_id]['client'].disconnect()
+        except:
+            pass
+    
+    # Удаляем мастер-сессию
+    remove_master_session()
+    
+    # Очищаем данные авторизации
+    if user_id in auth_data:
+        del auth_data[user_id]
+    
+    await message.reply(
+        "🚪 Вы вышли из аккаунта.\n\n"
+        "При следующем использовании нужно будет авторизоваться заново.",
         reply_markup=get_main_keyboard(user_id)
     )
 
@@ -1485,10 +1523,19 @@ async def process_keywords(message: types.Message):
 # ========== ОБРАБОТЧИКИ ИНЛАЙН-КНОПОК ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
 async def process_delete_callback(callback_query: types.CallbackQuery):
-    """Обрабатывает удаление канала (доступно всем)"""
+    """Обрабатывает удаление канала (только для админа)"""
     await bot.answer_callback_query(callback_query.id)
     
     user_id = callback_query.from_user.id
+    
+    # Проверяем, админ ли пользователь
+    if not is_admin(user_id):
+        await bot.send_message(
+            user_id,
+            "❌ Удаление каналов доступно только администратору.",
+            reply_markup=get_main_keyboard(user_id)
+        )
+        return
     
     data = callback_query.data
     channels = load_channels()
