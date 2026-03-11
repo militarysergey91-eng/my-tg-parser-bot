@@ -46,6 +46,13 @@ UPLOADS_DIR = 'uploads'
 # ID администратора (твой ID)
 ADMIN_ID = 5224743551
 
+# Часовой пояс UTC+10
+UTC_PLUS_10 = timezone(timedelta(hours=10))
+
+# Максимальный период в днях
+MAX_PERIOD_DAYS = 30
+MAX_PERIOD_HOURS = MAX_PERIOD_DAYS * 24
+
 # Создаем папки, если их нет
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -406,6 +413,68 @@ def is_admin(user_id):
     """Проверяет, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПЕРИОДАМИ ==========
+def parse_period(text):
+    """Парсит текстовое представление периода и возвращает количество часов"""
+    text = text.lower().strip()
+    
+    # Убираем возможные точки в конце
+    text = text.rstrip('.')
+    
+    # Паттерны для русских единиц измерения
+    patterns = [
+        (r'^(\d+)\s*(?:час|часа|часов|ч)$', 1),  # часы
+        (r'^(\d+)\s*(?:минут|минута|минуты|мин|м)$', 1/60),  # минуты
+        (r'^(\d+)\s*(?:день|дня|дней|д|сут|суток)$', 24),  # дни
+    ]
+    
+    for pattern, multiplier in patterns:
+        match = re.match(pattern, text)
+        if match:
+            value = int(match.group(1))
+            return value * multiplier
+    
+    # Если просто число - считаем что это часы
+    match = re.match(r'^(\d+)$', text)
+    if match:
+        return int(match.group(1))
+    
+    return None
+
+def format_period(period_hours):
+    """Форматирует количество часов в читаемый текст"""
+    if period_hours < 1:
+        minutes = int(period_hours * 60)
+        if minutes == 1:
+            return "1 минута"
+        elif minutes < 5:
+            return f"{minutes} минуты"
+        else:
+            return f"{minutes} минут"
+    elif period_hours < 24:
+        if period_hours == 1:
+            return "1 час"
+        elif period_hours < 5:
+            return f"{int(period_hours)} часа"
+        else:
+            return f"{int(period_hours)} часов"
+    else:
+        days = period_hours / 24
+        if days == 1:
+            return "1 день"
+        elif days < 5:
+            return f"{int(days)} дня"
+        else:
+            return f"{int(days)} дней"
+
+def format_datetime_utc10(dt):
+    """Форматирует дату с часовым поясом UTC+10"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    # Переводим в UTC+10
+    dt_utc10 = dt.astimezone(UTC_PLUS_10)
+    return dt_utc10.strftime('%d.%m.%Y %H:%M')
+
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id):
     """Главная клавиатура с кнопками"""
@@ -431,7 +500,7 @@ def get_main_keyboard(user_id):
     return keyboard
 
 def get_period_keyboard():
-    """Клавиатура для выбора периода (одинаковая для всех)"""
+    """Клавиатура для выбора периода"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("🕐 1 час"),
@@ -440,6 +509,15 @@ def get_period_keyboard():
         KeyboardButton("📅 24 часа"),
         KeyboardButton("📆 3 дня"),
         KeyboardButton("📆 7 дней"),
+        KeyboardButton("⌨️ Свой период"),
+        KeyboardButton("◀️ Назад в меню")
+    )
+    return keyboard
+
+def get_custom_period_keyboard():
+    """Клавиатура для ввода своего периода"""
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    keyboard.add(
         KeyboardButton("◀️ Назад в меню")
     )
     return keyboard
@@ -492,7 +570,7 @@ async def cmd_start(message: types.Message):
         "1️⃣ Нажми '➕ Добавить канал' и отправь ссылку на канал\n"
         "2️⃣ Канал добавится в общий список для всех\n"
         "3️⃣ Нажми '🔍 Поиск' для поиска по ключевым словам\n"
-        "4️⃣ Выбери период времени\n"
+        "4️⃣ Выбери период времени (можно ввести свой)\n"
         "5️⃣ Выбери формат отчета\n\n"
         "📤 Импорт/экспорт каналов:\n"
         "• Экспорт - сохранить список каналов в Excel\n"
@@ -906,7 +984,9 @@ async def search_by_keywords(message: types.Message):
     
     await message.reply(
         "⏱ Выбери период времени\n\n"
-        "За какой период собирать посты?",
+        f"Максимальный период: {MAX_PERIOD_DAYS} дней\n"
+        "За какой период собирать посты?\n"
+        "Можно выбрать из предложенных или ввести свой.",
         reply_markup=get_period_keyboard()
     )
     
@@ -949,6 +1029,7 @@ async def collect_all(message: types.Message):
     
     await message.reply(
         "⏱ Выбери период времени\n\n"
+        f"Максимальный период: {MAX_PERIOD_DAYS} дней\n"
         "За какой период собирать все посты?",
         reply_markup=get_period_keyboard()
     )
@@ -977,6 +1058,11 @@ async def show_help(message: types.Message):
         "После выбора периода появится выбор:\n"
         "🖼️ С картинками - сохранить изображения в отчет\n"
         "📝 Только текст - только текст, без картинок\n\n"
+        "⌨️ Свой период - можно ввести любой период, например:\n"
+        "• 30 минут\n"
+        "• 2 часа\n"
+        "• 5 дней\n"
+        f"• Максимум: {MAX_PERIOD_DAYS} дней\n\n"
         "Команды:\n"
         "/debug - диагностика\n"
         "/checksession - проверка сессии"
@@ -1100,6 +1186,21 @@ async def process_period(message: types.Message):
         period_hours = 72
     elif period_text == "📆 7 дней":
         period_hours = 168
+    elif period_text == "⌨️ Свой период":
+        await message.reply(
+            f"⌨️ Введите свой период\n\n"
+            f"Примеры:\n"
+            f"• 30 минут\n"
+            f"• 2 часа\n"
+            f"• 5 дней\n"
+            f"• 90 мин\n"
+            f"• 24\n\n"
+            f"Максимальный период - {MAX_PERIOD_DAYS} дней\n"
+            f"(можно писать слитно: 30минут, 2часа, 5дней)",
+            reply_markup=get_custom_period_keyboard()
+        )
+        user_data[user_id]['state'] = 'waiting_custom_period'
+        return
     elif period_text == "◀️ Назад в меню":
         await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
         del user_data[user_id]
@@ -1112,6 +1213,55 @@ async def process_period(message: types.Message):
         return
     
     user_data[user_id]['period_hours'] = period_hours
+    user_data[user_id]['period_text'] = period_text
+    
+    await message.reply(
+        "🖼️ Выбери формат отчета:\n\n"
+        "• С картинками - будут сохранены все изображения\n"
+        "• Только текст - только текст, без картинок (быстрее)",
+        reply_markup=get_image_option_keyboard()
+    )
+    
+    user_data[user_id]['state'] = 'waiting_image_option'
+
+@dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_custom_period')
+async def process_custom_period(message: types.Message):
+    """Обработка ввода своего периода"""
+    user_id = message.from_user.id
+    period_text = message.text
+    
+    if period_text == "◀️ Назад в меню":
+        await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
+        del user_data[user_id]
+        return
+    
+    period_hours = parse_period(period_text)
+    
+    if period_hours is None or period_hours <= 0:
+        await message.reply(
+            "❌ Не удалось распознать период.\n\n"
+            "Примеры правильного ввода:\n"
+            "• 30 минут\n"
+            "• 2 часа\n"
+            "• 5 дней\n"
+            "• 90 мин\n"
+            "• 24\n\n"
+            f"Максимальный период - {MAX_PERIOD_DAYS} дней\n"
+            "Попробуйте еще раз:",
+            reply_markup=get_custom_period_keyboard()
+        )
+        return
+    
+    if period_hours > MAX_PERIOD_HOURS:
+        await message.reply(
+            f"❌ Период не может превышать {MAX_PERIOD_DAYS} дней.\n"
+            f"Введите меньший период:",
+            reply_markup=get_custom_period_keyboard()
+        )
+        return
+    
+    user_data[user_id]['period_hours'] = period_hours
+    user_data[user_id]['period_text'] = period_text
     
     await message.reply(
         "🖼️ Выбери формат отчета:\n\n"
@@ -1149,18 +1299,7 @@ async def process_image_option(message: types.Message):
         user_data[user_id]['state'] = 'collecting'
         
         period_hours = user_data[user_id]['period_hours']
-        if period_hours == 1:
-            period_text = "1 час"
-        elif period_hours == 3:
-            period_text = "3 часа"
-        elif period_hours == 7:
-            period_text = "7 часов"
-        elif period_hours == 24:
-            period_text = "24 часа"
-        elif period_hours == 72:
-            period_text = "3 дня"
-        else:
-            period_text = "7 дней"
+        period_text = user_data[user_id].get('period_text', format_period(period_hours))
         
         await message.reply(
             f"🔄 Начинаю сбор всех постов за {period_text}\n"
@@ -1539,18 +1678,7 @@ async def process_keywords(message: types.Message):
         'save_images': save_images
     }
     
-    if period_hours == 1:
-        period_text = "1 час"
-    elif period_hours == 3:
-        period_text = "3 часа"
-    elif period_hours == 7:
-        period_text = "7 часов"
-    elif period_hours == 24:
-        period_text = "24 часа"
-    elif period_hours == 72:
-        period_text = "3 дня"
-    else:
-        period_text = "7 дней"
+    period_text = user_data[user_id].get('period_text', format_period(period_hours))
     
     await message.reply(
         f"🔍 Начинаю поиск\n"
@@ -1637,18 +1765,7 @@ async def collect_and_send_report(user_id):
         period_hours = user_data[user_id].get('period_hours', 168)
         save_images = user_data[user_id].get('save_images', True)
         
-        if period_hours == 1:
-            period_display = "1 час"
-        elif period_hours == 3:
-            period_display = "3 часа"
-        elif period_hours == 7:
-            period_display = "7 часов"
-        elif period_hours == 24:
-            period_display = "24 часа"
-        elif period_hours == 72:
-            period_display = "3 дня"
-        else:
-            period_display = "7 дней"
+        period_text = user_data[user_id].get('period_text', format_period(period_hours))
         
         await bot.send_message(user_id, "🔄 Подключаюсь к Telegram...")
         
@@ -1686,9 +1803,11 @@ async def collect_and_send_report(user_id):
         title = doc.add_heading('Отчёт по Telegram-каналам', 0)
         title.alignment = 1
         
-        doc.add_paragraph(f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
+        # Используем UTC+10 для даты формирования отчета
+        now_utc10 = datetime.now(UTC_PLUS_10)
+        doc.add_paragraph(f"Дата формирования: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
-        doc.add_paragraph(f"Период: последние {period_display}")
+        doc.add_paragraph(f"Период: {period_text}")
         doc.add_paragraph()
         
         total_posts = 0
@@ -1760,11 +1879,9 @@ async def collect_and_send_report(user_id):
                     for message in channel_posts:
                         p = doc.add_paragraph()
                         
-                        display_date = message.date
-                        if display_date:
-                            if display_date.tzinfo is not None:
-                                display_date = display_date.astimezone()
-                            p.add_run(f"📅 {display_date.strftime('%d.%m.%Y %H:%M')}\n").bold = True
+                        # Используем UTC+10 для даты поста
+                        display_date = format_datetime_utc10(message.date)
+                        p.add_run(f"📅 {display_date}\n").bold = True
                         
                         if message.text:
                             text = message.text
@@ -1831,8 +1948,8 @@ async def collect_and_send_report(user_id):
         doc.add_paragraph(f"Всего обработано каналов: {processed_channels}/{len(channels)}")
         doc.add_paragraph(f"Каналов с найденными постами: {channels_with_posts}")
         doc.add_paragraph(f"Всего найдено постов: {total_posts}")
-        doc.add_paragraph(f"Период: последние {period_display}")
-        doc.add_paragraph(f"Начало периода: {start_time.strftime('%d.%m.%Y %H:%M')}")
+        doc.add_paragraph(f"Период: {period_text}")
+        doc.add_paragraph(f"Начало периода: {format_datetime_utc10(start_time)}")
         doc.add_paragraph(f"Формат отчета: {'с картинками' if save_images else 'только текст'}")
         if stopped_early:
             doc.add_paragraph("⚠️ Отчет был остановлен досрочно по запросу пользователя")
@@ -1842,7 +1959,7 @@ async def collect_and_send_report(user_id):
             await bot.send_message(
                 user_id, 
                 f"📭 Поиск завершен\n\n"
-                f"За период {period_display} не найдено постов, соответствующих запросу: {keywords}\n"
+                f"За период {period_text} не найдено постов, соответствующих запросу: {keywords}\n"
                 f"Проверено каналов: {len(channels)}",
                 reply_markup=get_main_keyboard(user_id)
             )
@@ -1861,8 +1978,9 @@ async def collect_and_send_report(user_id):
             caption += f"📊 Найдено постов: {total_posts}\n"
             caption += f"📁 Каналов с постами: {channels_with_posts}/{processed_channels}\n"
             caption += f"🔍 Ключевые слова: {keywords}\n"
-            caption += f"⏱ Период: {period_display}\n"
+            caption += f"⏱ Период: {period_text}\n"
             caption += f"🖼️ Формат: {'с картинками' if save_images else 'только текст'}\n"
+            caption += f"🌏 Часовой пояс: UTC+10\n"
             if stopped_early:
                 caption += f"⚠️ Отчет остановлен досрочно\n"
             
@@ -1939,6 +2057,8 @@ if __name__ == '__main__':
     print(f"👑 Администратор ID: {ADMIN_ID}")
     print(f"📊 Всего каналов в базе: {len(channels)}")
     print(f"📁 Папки: {SESSIONS_DIR}, {IMAGES_DIR}, {UPLOADS_DIR}")
+    print(f"🌏 Часовой пояс: UTC+10")
+    print(f"⏱ Максимальный период: {MAX_PERIOD_DAYS} дней")
     
     # Показываем список каналов для проверки
     if channels:
