@@ -527,8 +527,8 @@ def get_main_keyboard(user_id):
     kb.add(
         KeyboardButton("📋 Список каналов"),
         KeyboardButton("➕ Добавить канал"),
-        KeyboardButton("📤 Импорт каналов"),
-        KeyboardButton("📥 Экспорт каналов"),
+        KeyboardButton("📥 Импорт каналов"),
+        KeyboardButton("📤 Экспорт каналов"),
         KeyboardButton("🔍 Поиск"),
         KeyboardButton("❓ Помощь"),
         KeyboardButton("⏹️ Стоп")
@@ -626,7 +626,7 @@ async def start(message: types.Message):
         "• Искать по всему Telegram\n"
         "• Искать в Google, Bing, Yandex, DuckDuckGo\n"
         "• Переводить текст на русский\n"
-        "• Импорт/экспорт каналов из Excel\n\n"
+        "• Импорт/экспорт каналов из Excel/TXT\n\n"
         f"📊 Каналов в базе: {len(channels)}\n"
     )
     
@@ -665,13 +665,13 @@ async def add_channel(m: types.Message):
     await m.reply("🔗 Отправь ссылку на канал\nПример: @durov или https://t.me/durov")
     user_data[user_id] = {'state': 'waiting_channel'}
 
-@dp.message_handler(lambda m: m.text == "📤 Импорт каналов")
+@dp.message_handler(lambda m: m.text == "📥 Импорт каналов")
 async def import_menu(m: types.Message):
     user_id = m.from_user.id
-    await m.reply("📤 Выберите способ импорта:", reply_markup=get_import_export_keyboard())
+    await m.reply("📥 Выберите способ импорта:", reply_markup=get_import_export_keyboard())
     user_data[user_id] = {'state': 'waiting_import_type'}
 
-@dp.message_handler(lambda m: m.text == "📥 Экспорт каналов")
+@dp.message_handler(lambda m: m.text == "📤 Экспорт каналов")
 async def export_channels(m: types.Message):
     user_id = m.from_user.id
     
@@ -866,8 +866,8 @@ async def help_cmd(m: types.Message):
         "❓ Помощь\n\n"
         "📋 Список каналов - посмотреть каналы\n"
         "➕ Добавить канал - добавить канал\n"
-        "📤 Импорт каналов - загрузить каналы из файла\n"
-        "📥 Экспорт каналов - сохранить каналы в Excel\n"
+        "📥 Импорт каналов - загрузить каналы из файла\n"
+        "📤 Экспорт каналов - сохранить каналы в Excel\n"
         "🔍 Поиск - начать поиск\n"
         "⏹️ Стоп - остановить поиск\n\n"
         "🌐 Поисковики: Google, Bing, Yandex, DuckDuckGo\n"
@@ -1768,7 +1768,8 @@ if __name__ == '__main__':
     print(f"👑 Админ: {ADMIN_ID}")
     print(f"📊 Каналов: {len(channels)}")
     print(f"🌍 Перевод: только на русский")
-    print(f"📤 Импорт/экспорт: Excel и TXT")
+    print(f"📥 Импорт: Excel и TXT")
+    print(f"📤 Экспорт: Excel")
     print("=" * 40)
     
     executor.start_polling(dp, skip_updates=True)
