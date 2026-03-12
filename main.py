@@ -472,27 +472,29 @@ async def start(message: types.Message):
     if is_admin(user_id):
         text = (
             "👋 Привет, Админ!\n\n"
-            "Я бот для поиска в Telegram\n\n"
-            "🔍 Что умею:\n"
-            "• Искать по каналам\n"
-            "• Переводить текст на русский\n"
-            "• Управлять каналами (добавлять, удалять)\n"
-            "• Импорт/экспорт каналов из Excel/TXT\n\n"
-            f"📊 Каналов в базе: {len(channels)}\n"
+            "🔍 Я бот для поиска по Telegram группам и каналам\n\n"
+            "📌 В моей базе сейчас: {len(channels)} групп/каналов\n\n"
+            "⚡️ Мои возможности:\n"
+            "• Поиск по добавленным группам\n"
+            "• Автоматический перевод на русский\n"
+            "• Управление списком групп (добавление, удаление)\n"
+            "• Импорт/экспорт списка групп из Excel/TXT\n\n"
+            "👇 Используй кнопки внизу экрана"
         )
     else:
         text = (
             "👋 Привет!\n\n"
-            "Я бот для поиска в Telegram\n\n"
-            "🔍 Что умею:\n"
-            "• Смотреть список каналов\n"
-            "• Искать по каналам\n"
-            "• Переводить текст на русский\n\n"
-            f"📊 Доступно каналов: {len(channels)}\n"
+            "🔍 Я бот для поиска по Telegram группам и каналам\n\n"
+            "📌 В моей базе сейчас: {len(channels)} групп/каналов\n\n"
+            "⚡️ Мои возможности:\n"
+            "• Просмотр списка доступных групп\n"
+            "• Поиск по группам\n"
+            "• Автоматический перевод на русский\n\n"
+            "👇 Используй кнопки внизу экрана"
         )
     
     if not MASTER_SESSION and is_admin(user_id):
-        text += "\n⚠️ Нажми 🔍 Поиск для авторизации"
+        text += "\n\n⚠️ Нажми 🔍 Поиск для авторизации"
     
     await message.reply(text, reply_markup=get_main_keyboard(user_id))
 
@@ -502,7 +504,7 @@ async def show_channels(m: types.Message):
     channels = load_channels()
     
     if not channels:
-        await m.reply("📭 Нет каналов", reply_markup=get_channels_menu_keyboard(user_id))
+        await m.reply("📭 Нет добавленных групп/каналов", reply_markup=get_channels_menu_keyboard(user_id))
         return
     
     # Создаем клавиатуру со списком каналов
@@ -526,11 +528,11 @@ async def show_channels(m: types.Message):
     kb.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
     
     # Формируем текст сообщения
-    text = "📋 Список каналов:\n\n"
+    text = "📋 Список групп и каналов:\n\n"
     for i, ch in enumerate(channels, 1):
         text += f"{i}. {ch['name']}\n"
     
-    text += f"\nВсего каналов: {len(channels)}"
+    text += f"\nВсего групп/каналов: {len(channels)}"
     
     if not is_admin(user_id):
         text += "\n\nℹ️ Нажми на название чтобы перейти"
@@ -542,10 +544,10 @@ async def add_channel_prompt(m: types.Message):
     user_id = m.from_user.id
     
     if not is_admin(user_id):
-        await m.reply("❌ Только администратор может добавлять каналы")
+        await m.reply("❌ Только администратор может добавлять группы/каналы")
         return
     
-    await m.reply("🔗 Отправь ссылку на канал\nПример: @durov или https://t.me/durov")
+    await m.reply("🔗 Отправь ссылку на группу или канал\nПример: @durov или https://t.me/durov")
     user_data[user_id] = {'state': 'waiting_channel'}
 
 @dp.message_handler(lambda m: m.text == "📥 Импорт каналов")
@@ -553,10 +555,10 @@ async def import_menu(m: types.Message):
     user_id = m.from_user.id
     
     if not is_admin(user_id):
-        await m.reply("❌ Только администратор может импортировать каналы")
+        await m.reply("❌ Только администратор может импортировать группы/каналы")
         return
     
-    await m.reply("📥 Выберите способ импорта:", reply_markup=get_import_export_keyboard())
+    await m.reply("📥 Выберите способ импорта списка групп:", reply_markup=get_import_export_keyboard())
     user_data[user_id] = {'state': 'waiting_import_type'}
 
 @dp.message_handler(lambda m: m.text == "📤 Экспорт каналов")
@@ -564,10 +566,10 @@ async def export_channels(m: types.Message):
     user_id = m.from_user.id
     
     if not is_admin(user_id):
-        await m.reply("❌ Только администратор может экспортировать каналы")
+        await m.reply("❌ Только администратор может экспортировать список групп")
         return
     
-    status_msg = await m.reply("🔄 Создаю Excel файл...")
+    status_msg = await m.reply("🔄 Создаю Excel файл со списком групп...")
     
     try:
         filepath = export_channels_to_excel()
@@ -577,7 +579,7 @@ async def export_channels(m: types.Message):
                 await bot.send_document(
                     user_id,
                     f,
-                    caption="📊 Список каналов в формате Excel"
+                    caption="📊 Список групп и каналов в формате Excel"
                 )
             
             os.remove(filepath)
@@ -591,7 +593,7 @@ async def export_channels(m: types.Message):
 async def import_excel_prompt(m: types.Message):
     user_id = m.from_user.id
     await m.reply(
-        "📥 Отправьте Excel файл (.xlsx) с каналами\n\n"
+        "📥 Отправьте Excel файл (.xlsx) со списком групп\n\n"
         "Формат: первый столбец - название, второй - ссылка",
         reply_markup=get_import_export_keyboard()
     )
@@ -601,8 +603,8 @@ async def import_excel_prompt(m: types.Message):
 async def import_txt_prompt(m: types.Message):
     user_id = m.from_user.id
     await m.reply(
-        "📥 Отправьте текстовый файл (.txt) с каналами\n\n"
-        "Формат: Название, ссылка (каждая строка - один канал)",
+        "📥 Отправьте текстовый файл (.txt) со списком групп\n\n"
+        "Формат: Название, ссылка (каждая строка - одна группа)",
         reply_markup=get_import_export_keyboard()
     )
     user_data[user_id] = {'state': 'waiting_txt_file'}
@@ -657,8 +659,8 @@ async def handle_document(message: types.Message):
         # Формируем ответ
         if result['success']:
             response = f"✅ Импорт завершен!\n\n"
-            response += f"📊 Добавлено новых каналов: {result['added']}\n"
-            response += f"📈 Всего каналов в базе: {result['total']}\n"
+            response += f"📊 Добавлено новых групп/каналов: {result['added']}\n"
+            response += f"📈 Всего групп/каналов в базе: {result['total']}\n"
             
             if result['duplicates']:
                 response += f"\n⚠️ Найдены дубликаты: {len(result['duplicates'])}"
@@ -697,10 +699,10 @@ async def search_menu(m: types.Message):
     # Проверяем есть ли каналы
     channels = load_channels()
     if not channels:
-        await m.reply("❌ Нет доступных каналов для поиска", reply_markup=get_main_keyboard(user_id))
+        await m.reply("❌ Нет доступных групп/каналов для поиска", reply_markup=get_main_keyboard(user_id))
         return
     
-    await m.reply("🔍 Введи ключевые слова для поиска:", reply_markup=get_main_keyboard(user_id))
+    await m.reply("🔍 Введи ключевые слова для поиска по группам:", reply_markup=get_main_keyboard(user_id))
     user_data[user_id] = {'state': 'waiting_keywords', 'channels': channels}
 
 @dp.message_handler(lambda m: m.text == "🔄 Собрать всё")
@@ -712,7 +714,7 @@ async def collect_all(m: types.Message):
     
     channels = load_channels()
     if not channels:
-        await m.reply("❌ Нет каналов")
+        await m.reply("❌ Нет групп/каналов")
         return
     
     user_data[user_id] = {'state': 'waiting_period', 'keywords': 'все', 'channels': channels}
@@ -725,11 +727,11 @@ async def help_cmd(m: types.Message):
     if is_admin(user_id):
         text = (
             "❓ Помощь (Админ)\n\n"
-            "📋 Список каналов - просмотр и управление\n"
-            "➕ Добавить канал - добавить канал\n"
-            "📥 Импорт каналов - загрузить из Excel/TXT\n"
-            "📤 Экспорт каналов - сохранить в Excel\n"
-            "🔍 Поиск - начать поиск по ключевым словам\n"
+            "📋 Список каналов - просмотр и управление списком групп\n"
+            "➕ Добавить канал - добавить новую группу/канал\n"
+            "📥 Импорт каналов - загрузить список групп из Excel/TXT\n"
+            "📤 Экспорт каналов - сохранить список групп в Excel\n"
+            "🔍 Поиск - начать поиск по ключевым словам в группах\n"
             "🔄 Собрать всё - все посты без фильтра\n"
             "⏹️ Стоп - остановить поиск\n"
             "🚪 Выйти - выйти из аккаунта\n\n"
@@ -739,8 +741,8 @@ async def help_cmd(m: types.Message):
     else:
         text = (
             "❓ Помощь\n\n"
-            "📋 Список каналов - посмотреть доступные каналы\n"
-            "🔍 Поиск - начать поиск по ключевым словам\n"
+            "📋 Список каналов - посмотреть доступные группы/каналы\n"
+            "🔍 Поиск - начать поиск по ключевым словам в группах\n"
             "⏹️ Стоп - остановить поиск\n\n"
             "🌍 Перевод: автоматический на русский\n"
             "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
@@ -904,7 +906,7 @@ async def process_channel(m: types.Message):
     
     for ch in channels:
         if ch['url'] == link:
-            await m.reply("❌ Канал уже есть")
+            await m.reply("❌ Такая группа/канал уже есть в базе")
             del user_data[user_id]
             return
     
@@ -912,7 +914,7 @@ async def process_channel(m: types.Message):
     save_channels(channels)
     
     del user_data[user_id]
-    await m.reply(f"✅ Канал добавлен!\n{name}\n{link}\nВсего: {len(channels)}", reply_markup=get_main_keyboard(user_id))
+    await m.reply(f"✅ Группа/канал добавлен!\n{name}\n{link}\nВсего в базе: {len(channels)}", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_keywords')
 async def process_keywords(m: types.Message):
@@ -922,7 +924,7 @@ async def process_keywords(m: types.Message):
     user_data[user_id]['keywords'] = keywords
     user_data[user_id]['state'] = 'waiting_period'
     
-    await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
+    await m.reply("⏱ За какой период ищем в группах?", reply_markup=get_period_keyboard())
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_period')
 async def process_period(m: types.Message):
@@ -958,7 +960,7 @@ async def process_period(m: types.Message):
     user_data[user_id]['period_text'] = text
     
     # Переходим сразу к выбору формата
-    await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
+    await m.reply("🖼️ Выбери формат отчета:", reply_markup=get_image_keyboard())
     user_data[user_id]['state'] = 'waiting_image'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_custom_period')
@@ -967,7 +969,7 @@ async def process_custom_period(m: types.Message):
     text = m.text
     
     if text == "◀️ Назад":
-        await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
+        await m.reply("⏱ За какой период ищем в группах?", reply_markup=get_period_keyboard())
         user_data[user_id]['state'] = 'waiting_period'
         return
     
@@ -985,7 +987,7 @@ async def process_custom_period(m: types.Message):
     user_data[user_id]['period_text'] = text
     
     # Переходим сразу к выбору формата
-    await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
+    await m.reply("🖼️ Выбери формат отчета:", reply_markup=get_image_keyboard())
     user_data[user_id]['state'] = 'waiting_image'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_image')
@@ -994,14 +996,14 @@ async def process_image(m: types.Message):
     text = m.text
     
     if text == "◀️ Назад":
-        await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
+        await m.reply("⏱ За какой период ищем в группах?", reply_markup=get_period_keyboard())
         user_data[user_id]['state'] = 'waiting_period'
         return
     
     save_images = (text == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    await m.reply(f"🔍 Начинаю поиск...\nЭто может занять время", reply_markup=get_main_keyboard(user_id))
+    await m.reply(f"🔍 Начинаю поиск по группам...\nЭто может занять время", reply_markup=get_main_keyboard(user_id))
     
     await collect_from_channels(user_id)
 
@@ -1017,7 +1019,7 @@ async def collect_from_channels(user_id):
         hours = data['period_hours']
         save_images = data['save_images']
         
-        await bot.send_message(user_id, "🔄 Подключаюсь...")
+        await bot.send_message(user_id, "🔄 Подключаюсь к Telegram...")
         
         if not MASTER_SESSION:
             await bot.send_message(user_id, "❌ Нет подключения к Telegram")
@@ -1031,9 +1033,9 @@ async def collect_from_channels(user_id):
             return
         
         doc = Document()
-        doc.add_heading('Поиск по каналам', 0).alignment = 1
+        doc.add_heading('Поиск по Telegram группам и каналам', 0).alignment = 1
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Слова: {keywords}")
+        doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
         doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
@@ -1077,7 +1079,7 @@ async def collect_from_channels(user_id):
                 
                 if posts:
                     channels_with += 1
-                    doc.add_heading(f"Канал: {channel['name']}", level=1)
+                    doc.add_heading(f"Группа/канал: {channel['name']}", level=1)
                     doc.add_paragraph(f"Ссылка: {url}")
                     doc.add_paragraph()
                     
@@ -1104,11 +1106,11 @@ async def collect_from_channels(user_id):
                             username = url.split('/')[-1]
                             link = f"https://t.me/{username}/{msg.id}"
                             p = doc.add_paragraph()
-                            add_hyperlink(p, "🔗 Ссылка", link)
+                            add_hyperlink(p, "🔗 Ссылка на сообщение", link)
                         
                         doc.add_paragraph()
                     
-                    doc.add_paragraph(f"✅ Найдено: {count}")
+                    doc.add_paragraph(f"✅ Найдено сообщений: {count}")
                     doc.add_page_break()
                 
             except FloodWaitError as e:
@@ -1117,24 +1119,24 @@ async def collect_from_channels(user_id):
                 await asyncio.sleep(wait)
                 continue
             except Exception as e:
-                await bot.send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
-                doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']}")
+                await bot.send_message(user_id, f"⚠️ Ошибка доступа: {str(e)[:100]}")
+                doc.add_paragraph(f"❌ Ошибка доступа к группе/каналу: {channel['name']}")
                 doc.add_page_break()
         
-        doc.add_heading('Статистика', level=1)
-        doc.add_paragraph(f"Обработано: {processed}/{len(channels)}")
-        doc.add_paragraph(f"С постами: {channels_with}")
-        doc.add_paragraph(f"Всего постов: {total}")
+        doc.add_heading('Итоговая статистика', level=1)
+        doc.add_paragraph(f"Обработано групп/каналов: {processed}/{len(channels)}")
+        doc.add_paragraph(f"Групп/каналов с результатами: {channels_with}")
+        doc.add_paragraph(f"Всего найдено сообщений: {total}")
         
         if total == 0:
             await bot.send_message(user_id, "📭 Ничего не найдено")
             return
         
-        filename = f"report_{user_id}_{int(time.time())}.docx"
+        filename = f"search_report_{user_id}_{int(time.time())}.docx"
         doc.save(filename)
         
         with open(filename, 'rb') as f:
-            await bot.send_document(user_id, f, caption=f"✅ Готово! Найдено: {total}")
+            await bot.send_document(user_id, f, caption=f"✅ Поиск завершен! Найдено сообщений: {total}")
         
         os.remove(filename)
         cleanup_temp_files(user_id)
@@ -1164,14 +1166,14 @@ async def delete_callback(call):
     
     if data == "del_all":
         save_channels([])
-        await bot.send_message(user_id, "🗑 Все каналы удалены", reply_markup=get_main_keyboard(user_id))
+        await bot.send_message(user_id, "🗑 Все группы/каналы удалены", reply_markup=get_main_keyboard(user_id))
         return
     
     idx = int(data.split('_')[1])
     if idx < len(channels):
         deleted = channels.pop(idx)
         save_channels(channels)
-        await bot.send_message(user_id, f"🗑 Удален: {deleted['name']}", reply_markup=get_main_keyboard(user_id))
+        await bot.send_message(user_id, f"🗑 Удалена группа/канал: {deleted['name']}", reply_markup=get_main_keyboard(user_id))
 
 @dp.callback_query_handler(lambda c: c.data == 'back_to_main')
 async def back_callback(call):
@@ -1201,9 +1203,9 @@ async def unknown(m: types.Message):
             user_data[user_id] = {'state': 'waiting_channel'}
             await process_channel(m)
         else:
-            await m.reply("❌ Только администратор может добавлять каналы")
+            await m.reply("❌ Только администратор может добавлять группы/каналы")
     else:
-        await m.reply("Используй кнопки 👇", reply_markup=get_main_keyboard(user_id))
+        await m.reply("Используй кнопки внизу экрана 👇", reply_markup=get_main_keyboard(user_id))
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
@@ -1211,9 +1213,9 @@ if __name__ == '__main__':
     channels = load_channels()
     
     print("=" * 50)
-    print("🤖 Бот запущен")
+    print("🤖 Бот для поиска по группам запущен")
     print(f"👑 Админ ID: {ADMIN_ID}")
-    print(f"📊 Каналов в базе: {len(channels)}")
+    print(f"📊 Групп/каналов в базе: {len(channels)}")
     print(f"🌍 Перевод: всегда на русский")
     print("=" * 50)
     
