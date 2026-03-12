@@ -51,7 +51,7 @@ MAX_PERIOD_DAYS = 30
 MAX_PERIOD_HOURS = MAX_PERIOD_DAYS * 24
 
 # Поисковики
-SEARCH_ENGINES = ['google', 'bing', 'yahoo', 'yandex', 'duckduckgo']
+SEARCH_ENGINES = ['google', 'bing', 'yandex', 'duckduckgo']
 
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
@@ -67,13 +67,15 @@ auth_data = {}
 stop_flags = {}
 MASTER_SESSION = None
 
-# ========== ПЕРЕВОД ==========
+# ========== ПЕРЕВОД НА РУССКИЙ ==========
 class TranslatorManager:
     def __init__(self):
         self.translator = Translator()
         
     def detect_language(self, text):
         try:
+            if not text or len(text) < 10:
+                return 'unknown'
             return langdetect.detect(text)
         except:
             return 'unknown'
@@ -81,25 +83,35 @@ class TranslatorManager:
     def get_language_name(self, code):
         return LANGUAGES.get(code, code)
     
-    async def translate(self, text, dest='ru'):
+    async def translate_to_russian(self, text):
+        """Переводит текст на русский язык"""
         try:
-            if not text:
-                return {'translated': '', 'was_translated': False}
+            if not text or len(text) < 10:
+                return {'translated': text, 'was_translated': False, 'src_lang': 'unknown'}
             
+            # Определяем язык
             src = self.detect_language(text)
             
-            if src == dest:
-                return {'translated': text, 'was_translated': False}
+            # Если текст уже на русском или не удалось определить, не переводим
+            if src == 'ru' or src == 'unknown':
+                return {'translated': text, 'was_translated': False, 'src_lang': src}
             
-            result = await self.translator.translate(text, dest=dest)
-            return {
-                'translated': result.text,
-                'src_lang': src,
-                'src_name': self.get_language_name(src),
-                'was_translated': True
-            }
-        except:
-            return {'translated': text, 'was_translated': False}
+            # Переводим
+            result = await self.translator.translate(text[:5000], dest='ru', src=src)
+            
+            if result and result.text:
+                return {
+                    'translated': result.text,
+                    'src_lang': src,
+                    'src_name': self.get_language_name(src),
+                    'was_translated': True
+                }
+            else:
+                return {'translated': text, 'was_translated': False, 'src_lang': src}
+                
+        except Exception as e:
+            print(f"Ошибка перевода: {e}")
+            return {'translated': text, 'was_translated': False, 'src_lang': 'unknown'}
 
 translator = TranslatorManager()
 
@@ -147,7 +159,8 @@ class WebSearch:
                                     'source': 'Google'
                                 })
             return results
-        except:
+        except Exception as e:
+            print(f"Ошибка Google: {e}")
             return []
     
     async def search_bing(self, query, num=10):
@@ -177,7 +190,8 @@ class WebSearch:
                                     'source': 'Bing'
                                 })
             return results
-        except:
+        except Exception as e:
+            print(f"Ошибка Bing: {e}")
             return []
     
     async def search_yandex(self, query, num=10):
@@ -207,7 +221,8 @@ class WebSearch:
                                     'source': 'Yandex'
                                 })
             return results
-        except:
+        except Exception as e:
+            print(f"Ошибка Yandex: {e}")
             return []
     
     async def search_duckduckgo(self, query, num=10):
@@ -237,7 +252,8 @@ class WebSearch:
                                     'source': 'DuckDuckGo'
                                 })
             return results
-        except:
+        except Exception as e:
+            print(f"Ошибка DuckDuckGo: {e}")
             return []
 
 web_search = WebSearch()
@@ -266,6 +282,146 @@ def extract_channel_name(url):
     url = normalize_channel_url(url)
     match = re.search(r't\.me/([a-zA-Z0-9_]+)', url)
     return match.group(1) if match else url.split('/')[-1]
+
+# ========== ФУНКЦИИ ИМПОРТА/ЭКСПОРТА ==========
+def export_channels_to_excel():
+    """Экспортирует каналы в Excel файл"""
+    try:
+        channels = load_channels()
+        
+        # Создаем DataFrame
+        df = pd.DataFrame(channels)
+        
+        # Добавляем столбец с номером
+        df.insert(0, '№', range(1, len(df) + 1))
+        
+        # Сохраняем в Excel
+        filename = f"channels_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        filepath = os.path.join(UPLOADS_DIR, filename)
+        
+        df.to_excel(filepath, index=False, engine='openpyxl')
+        
+        return filepath
+    except Exception as e:
+        print(f"Ошибка экспорта в Excel: {e}")
+        return None
+
+def import_channels_from_excel(file_path):
+    """Импортирует каналы из Excel файла"""
+    try:
+        # Читаем Excel файл
+        df = pd.read_excel(file_path, engine='openpyxl')
+        
+        # Получаем текущие каналы
+        current_channels = load_channels()
+        current_urls = [ch['url'] for ch in current_channels]
+        
+        new_channels = []
+        duplicates = []
+        invalid = []
+        
+        # Проходим по всем строкам
+        for index, row in df.iterrows():
+            # Ищем столбцы с названием и ссылкой
+            name_col = None
+            url_col = None
+            
+            # Автоматически определяем столбцы
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'название' in col_lower or 'name' in col_lower or 'канал' in col_lower:
+                    name_col = col
+                if 'ссылка' in col_lower or 'url' in col_lower or 'link' in col_lower:
+                    url_col = col
+            
+            # Если нашли нужные столбцы
+            if name_col and url_col:
+                name = str(row[name_col]).strip()
+                url = str(row[url_col]).strip()
+                
+                # Проверяем ссылку
+                if url and ('t.me/' in url or '@' in url):
+                    url = normalize_channel_url(url)
+                    
+                    # Проверяем дубликаты
+                    if url in current_urls:
+                        duplicates.append(f"{name} - {url}")
+                    else:
+                        new_channels.append({'name': name, 'url': url})
+                        current_urls.append(url)
+                else:
+                    invalid.append(f"{name} - {url}")
+        
+        # Добавляем новые каналы
+        if new_channels:
+            current_channels.extend(new_channels)
+            save_channels(current_channels)
+        
+        return {
+            'success': True,
+            'added': len(new_channels),
+            'duplicates': duplicates,
+            'invalid': invalid,
+            'total': len(current_channels)
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def import_channels_from_txt(file_path):
+    """Импортирует каналы из текстового файла"""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        current_channels = load_channels()
+        current_urls = [ch['url'] for ch in current_channels]
+        
+        new_channels = []
+        duplicates = []
+        invalid = []
+        
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            
+            # Пытаемся разделить строку на название и ссылку
+            parts = line.split(',')
+            if len(parts) >= 2:
+                name = parts[0].strip()
+                url = parts[1].strip()
+            else:
+                # Если только ссылка, пытаемся извлечь название
+                url = line
+                name = extract_channel_name(url) or url.split('/')[-1]
+            
+            # Проверяем ссылку
+            if url and ('t.me/' in url or '@' in url):
+                url = normalize_channel_url(url)
+                
+                # Проверяем дубликаты
+                if url in current_urls:
+                    duplicates.append(f"{name} - {url}")
+                else:
+                    new_channels.append({'name': name, 'url': url})
+                    current_urls.append(url)
+            else:
+                invalid.append(f"{name} - {url}")
+        
+        # Добавляем новые каналы
+        if new_channels:
+            current_channels.extend(new_channels)
+            save_channels(current_channels)
+        
+        return {
+            'success': True,
+            'added': len(new_channels),
+            'duplicates': duplicates,
+            'invalid': invalid,
+            'total': len(current_channels)
+        }
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
 def save_session_string(session_string):
     global MASTER_SESSION
@@ -310,7 +466,8 @@ def cleanup_temp_files(user_id):
 async def download_media(message, user_id, client):
     try:
         if message.media:
-            filename = f"img_{user_id}_{datetime.now().timestamp()}.jpg"
+            timestamp = datetime.now().timestamp()
+            filename = f"img_{user_id}_{timestamp}.jpg"
             path = os.path.join(IMAGES_DIR, filename)
             return await message.download_media(file=path)
     except:
@@ -370,12 +527,24 @@ def get_main_keyboard(user_id):
     kb.add(
         KeyboardButton("📋 Список каналов"),
         KeyboardButton("➕ Добавить канал"),
+        KeyboardButton("📤 Импорт каналов"),
+        KeyboardButton("📥 Экспорт каналов"),
         KeyboardButton("🔍 Поиск"),
         KeyboardButton("❓ Помощь"),
         KeyboardButton("⏹️ Стоп")
     )
     if is_admin(user_id):
         kb.add(KeyboardButton("🔄 Собрать всё"), KeyboardButton("🚪 Выйти"))
+    return kb
+
+def get_import_export_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        KeyboardButton("📥 Импорт из Excel"),
+        KeyboardButton("📥 Импорт из TXT"),
+        KeyboardButton("📤 Экспорт в Excel"),
+        KeyboardButton("◀️ Назад")
+    )
     return kb
 
 def get_search_type_keyboard():
@@ -415,14 +584,15 @@ def get_period_keyboard():
     )
     return kb
 
+def get_custom_period_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    kb.add(KeyboardButton("◀️ Назад"))
+    return kb
+
 def get_translation_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
-        KeyboardButton("🇷🇺 На русский"),
-        KeyboardButton("🇬🇧 На английский"),
-        KeyboardButton("🇩🇪 На немецкий"),
-        KeyboardButton("🇫🇷 На французский"),
-        KeyboardButton("🇪🇸 На испанский"),
+        KeyboardButton("🇷🇺 Перевести на русский"),
         KeyboardButton("🔄 Без перевода"),
         KeyboardButton("◀️ Назад")
     )
@@ -455,7 +625,8 @@ async def start(message: types.Message):
         "• Искать по твоим каналам\n"
         "• Искать по всему Telegram\n"
         "• Искать в Google, Bing, Yandex, DuckDuckGo\n"
-        "• Переводить текст\n\n"
+        "• Переводить текст на русский\n"
+        "• Импорт/экспорт каналов из Excel\n\n"
         f"📊 Каналов в базе: {len(channels)}\n"
     )
     
@@ -493,6 +664,125 @@ async def add_channel(m: types.Message):
     user_id = m.from_user.id
     await m.reply("🔗 Отправь ссылку на канал\nПример: @durov или https://t.me/durov")
     user_data[user_id] = {'state': 'waiting_channel'}
+
+@dp.message_handler(lambda m: m.text == "📤 Импорт каналов")
+async def import_menu(m: types.Message):
+    user_id = m.from_user.id
+    await m.reply("📤 Выберите способ импорта:", reply_markup=get_import_export_keyboard())
+    user_data[user_id] = {'state': 'waiting_import_type'}
+
+@dp.message_handler(lambda m: m.text == "📥 Экспорт каналов")
+async def export_channels(m: types.Message):
+    user_id = m.from_user.id
+    
+    status_msg = await m.reply("🔄 Создаю Excel файл...")
+    
+    try:
+        filepath = export_channels_to_excel()
+        
+        if filepath and os.path.exists(filepath):
+            with open(filepath, 'rb') as f:
+                await bot.send_document(
+                    user_id,
+                    f,
+                    caption="📊 Список каналов в формате Excel"
+                )
+            
+            os.remove(filepath)
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("❌ Ошибка при создании Excel файла")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
+
+@dp.message_handler(lambda m: m.text == "📥 Импорт из Excel")
+async def import_excel_prompt(m: types.Message):
+    user_id = m.from_user.id
+    await m.reply(
+        "📥 Отправьте Excel файл (.xlsx) с каналами\n\n"
+        "Формат: первый столбец - название, второй - ссылка",
+        reply_markup=get_import_export_keyboard()
+    )
+    user_data[user_id] = {'state': 'waiting_excel_file'}
+
+@dp.message_handler(lambda m: m.text == "📥 Импорт из TXT")
+async def import_txt_prompt(m: types.Message):
+    user_id = m.from_user.id
+    await m.reply(
+        "📥 Отправьте текстовый файл (.txt) с каналами\n\n"
+        "Формат: Название, ссылка (каждая строка - один канал)",
+        reply_markup=get_import_export_keyboard()
+    )
+    user_data[user_id] = {'state': 'waiting_txt_file'}
+
+@dp.message_handler(content_types=ContentType.DOCUMENT)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    
+    if user_id not in user_data:
+        await message.reply("Сначала выберите действие в меню", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    state = user_data[user_id].get('state')
+    
+    if state not in ['waiting_excel_file', 'waiting_txt_file']:
+        return
+    
+    document = message.document
+    file_name = document.file_name
+    file_ext = os.path.splitext(file_name)[1].lower()
+    
+    # Проверяем расширение файла
+    if state == 'waiting_excel_file' and file_ext not in ['.xlsx', '.xls']:
+        await message.reply("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    if state == 'waiting_txt_file' and file_ext != '.txt':
+        await message.reply("❌ Пожалуйста, отправьте текстовый файл (.txt)", reply_markup=get_main_keyboard(user_id))
+        return
+    
+    status_msg = await message.reply("🔄 Загружаю и обрабатываю файл...")
+    
+    try:
+        # Скачиваем файл
+        file_path = os.path.join(UPLOADS_DIR, f"{user_id}_{file_name}")
+        await document.download(destination_file=file_path)
+        
+        # Обрабатываем файл
+        if state == 'waiting_excel_file':
+            result = import_channels_from_excel(file_path)
+        else:
+            result = import_channels_from_txt(file_path)
+        
+        # Удаляем временный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        # Формируем ответ
+        if result['success']:
+            response = f"✅ Импорт завершен!\n\n"
+            response += f"📊 Добавлено новых каналов: {result['added']}\n"
+            response += f"📈 Всего каналов в базе: {result['total']}\n"
+            
+            if result['duplicates']:
+                response += f"\n⚠️ Найдены дубликаты: {len(result['duplicates'])}"
+            
+            if result['invalid']:
+                response += f"\n❌ Некорректные ссылки: {len(result['invalid'])}"
+        else:
+            response = f"❌ Ошибка импорта: {result['error']}"
+        
+        await status_msg.delete()
+        await message.reply(response, reply_markup=get_main_keyboard(user_id))
+        
+        # Очищаем состояние
+        del user_data[user_id]
+        
+    except Exception as e:
+        await status_msg.delete()
+        await message.reply(f"❌ Ошибка при обработке файла: {str(e)}")
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 @dp.message_handler(lambda m: m.text == "🔍 Поиск")
 async def search_menu(m: types.Message):
@@ -576,10 +866,12 @@ async def help_cmd(m: types.Message):
         "❓ Помощь\n\n"
         "📋 Список каналов - посмотреть каналы\n"
         "➕ Добавить канал - добавить канал\n"
+        "📤 Импорт каналов - загрузить каналы из файла\n"
+        "📥 Экспорт каналов - сохранить каналы в Excel\n"
         "🔍 Поиск - начать поиск\n"
         "⏹️ Стоп - остановить поиск\n\n"
         "🌐 Поисковики: Google, Bing, Yandex, DuckDuckGo\n"
-        "🌍 Перевод: русский, английский, немецкий, французский, испанский\n"
+        "🌍 Перевод: автоматический на русский\n"
         "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
     )
     await m.reply(text)
@@ -622,7 +914,10 @@ async def back(m: types.Message):
         elif state == 'waiting_web_type':
             user_data[user_id]['state'] = 'waiting_search_type'
             await m.reply("🔍 Где ищем?", reply_markup=get_search_type_keyboard())
-        elif state in ['waiting_keywords', 'waiting_period']:
+        elif state == 'waiting_import_type':
+            del user_data[user_id]
+            await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
+        elif state in ['waiting_keywords', 'waiting_period', 'waiting_excel_file', 'waiting_txt_file']:
             del user_data[user_id]
             await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
         else:
@@ -784,7 +1079,7 @@ async def process_period(m: types.Message):
     user_data[user_id]['period_hours'] = hours
     user_data[user_id]['period_text'] = text
     
-    await m.reply("🌍 Выбери язык перевода:", reply_markup=get_translation_keyboard())
+    await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
     user_data[user_id]['state'] = 'waiting_translation'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_custom_period')
@@ -810,7 +1105,7 @@ async def process_custom_period(m: types.Message):
     user_data[user_id]['period_hours'] = hours
     user_data[user_id]['period_text'] = text
     
-    await m.reply("🌍 Выбери язык перевода:", reply_markup=get_translation_keyboard())
+    await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
     user_data[user_id]['state'] = 'waiting_translation'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_translation')
@@ -823,21 +1118,16 @@ async def process_translation(m: types.Message):
         user_data[user_id]['state'] = 'waiting_period'
         return
     
-    lang_map = {
-        "🇷🇺 На русский": 'ru',
-        "🇬🇧 На английский": 'en',
-        "🇩🇪 На немецкий": 'de',
-        "🇫🇷 На французский": 'fr',
-        "🇪🇸 На испанский": 'es',
-        "🔄 Без перевода": None
-    }
-    
-    if text in lang_map:
-        user_data[user_id]['translation'] = lang_map[text]
-        await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
-        user_data[user_id]['state'] = 'waiting_image'
+    if text == "🇷🇺 Перевести на русский":
+        user_data[user_id]['translate'] = True
+    elif text == "🔄 Без перевода":
+        user_data[user_id]['translate'] = False
     else:
         await m.reply("❌ Выбери из кнопок")
+        return
+    
+    await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
+    user_data[user_id]['state'] = 'waiting_image'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_image')
 async def process_image(m: types.Message):
@@ -845,7 +1135,7 @@ async def process_image(m: types.Message):
     text = m.text
     
     if text == "◀️ Назад":
-        await m.reply("🌍 Выбери язык перевода:", reply_markup=get_translation_keyboard())
+        await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
         user_data[user_id]['state'] = 'waiting_translation'
         return
     
@@ -876,7 +1166,7 @@ async def collect_from_channels(user_id):
         channels = data['channels']
         hours = data['period_hours']
         save_images = data['save_images']
-        trans_lang = data.get('translation')
+        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🔄 Подключаюсь...")
         
@@ -892,6 +1182,8 @@ async def collect_from_channels(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
+        if need_translate:
+            doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
@@ -943,8 +1235,8 @@ async def collect_from_channels(user_id):
                         
                         if msg.text:
                             text = msg.text[:3000]
-                            if trans_lang:
-                                trans = await translator.translate(text, trans_lang)
+                            if need_translate:
+                                trans = await translator.translate_to_russian(text)
                                 if trans['was_translated']:
                                     p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
                                 else:
@@ -1001,7 +1293,7 @@ async def collect_from_channels(user_id):
             del stop_flags[user_id]
 
 async def collect_global(user_id):
-    """Глобальный поиск по всему Telegram (исправлено)"""
+    """Глобальный поиск по всему Telegram"""
     client = None
     try:
         stop_flags[user_id] = False
@@ -1010,7 +1302,7 @@ async def collect_global(user_id):
         keywords = data['keywords']
         hours = data['period_hours']
         save_images = data['save_images']
-        trans_lang = data.get('translation')
+        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🔄 Подключаюсь...")
         
@@ -1028,6 +1320,8 @@ async def collect_global(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
+        if need_translate:
+            doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         start = datetime.now().astimezone() - timedelta(hours=hours)
@@ -1077,8 +1371,8 @@ async def collect_global(user_id):
                     
                     if msg.message:
                         text = msg.message[:2000]
-                        if trans_lang:
-                            trans = await translator.translate(text, trans_lang)
+                        if need_translate:
+                            trans = await translator.translate_to_russian(text)
                             if trans['was_translated']:
                                 p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
                             else:
@@ -1128,7 +1422,7 @@ async def collect_web(user_id):
         data = user_data[user_id]
         keywords = data['keywords']
         web_type = data.get('web_type', 'all')
-        trans_lang = data.get('translation')
+        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🌐 Ищу в интернете...")
         
@@ -1136,12 +1430,14 @@ async def collect_web(user_id):
         doc.add_heading('Поиск в интернете', 0).alignment = 1
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
+        if need_translate:
+            doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
         
         if web_type == 'all' or web_type == 'google':
-            results = await web_search.search_google(keywords, 10)
+            results = await web_search.search_google(keywords, 8)
             if results:
                 doc.add_heading('Google', level=1)
                 for r in results:
@@ -1153,8 +1449,8 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if trans_lang:
-                            trans = await translator.translate(r['description'], trans_lang)
+                        if need_translate:
+                            trans = await translator.translate_to_russian(r['description'])
                             if trans['was_translated']:
                                 doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                             else:
@@ -1166,7 +1462,7 @@ async def collect_web(user_id):
                 doc.add_page_break()
         
         if web_type == 'all' or web_type == 'bing':
-            results = await web_search.search_bing(keywords, 10)
+            results = await web_search.search_bing(keywords, 8)
             if results:
                 doc.add_heading('Bing', level=1)
                 for r in results:
@@ -1178,8 +1474,8 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if trans_lang:
-                            trans = await translator.translate(r['description'], trans_lang)
+                        if need_translate:
+                            trans = await translator.translate_to_russian(r['description'])
                             if trans['was_translated']:
                                 doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                             else:
@@ -1191,7 +1487,7 @@ async def collect_web(user_id):
                 doc.add_page_break()
         
         if web_type == 'all' or web_type == 'yandex':
-            results = await web_search.search_yandex(keywords, 10)
+            results = await web_search.search_yandex(keywords, 8)
             if results:
                 doc.add_heading('Yandex', level=1)
                 for r in results:
@@ -1203,8 +1499,8 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if trans_lang:
-                            trans = await translator.translate(r['description'], trans_lang)
+                        if need_translate:
+                            trans = await translator.translate_to_russian(r['description'])
                             if trans['was_translated']:
                                 doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                             else:
@@ -1216,7 +1512,7 @@ async def collect_web(user_id):
                 doc.add_page_break()
         
         if web_type == 'all' or web_type == 'duckduckgo':
-            results = await web_search.search_duckduckgo(keywords, 10)
+            results = await web_search.search_duckduckgo(keywords, 8)
             if results:
                 doc.add_heading('DuckDuckGo', level=1)
                 for r in results:
@@ -1228,8 +1524,8 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if trans_lang:
-                            trans = await translator.translate(r['description'], trans_lang)
+                        if need_translate:
+                            trans = await translator.translate_to_russian(r['description'])
                             if trans['was_translated']:
                                 doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                             else:
@@ -1272,7 +1568,7 @@ async def collect_combined(user_id):
         channels = data.get('channels', [])
         hours = data['period_hours']
         save_images = data['save_images']
-        trans_lang = data.get('translation')
+        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "⚡ Комбинированный поиск...")
         
@@ -1281,6 +1577,8 @@ async def collect_combined(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
+        if need_translate:
+            doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
@@ -1292,7 +1590,7 @@ async def collect_combined(user_id):
         results = await web_search.search_google(keywords, 5)
         results += await web_search.search_bing(keywords, 5)
         
-        for r in results[:15]:
+        for r in results[:10]:
             if stop_flags.get(user_id):
                 break
             doc.add_heading(r['title'], level=2)
@@ -1301,8 +1599,8 @@ async def collect_combined(user_id):
             p.add_run("Ссылка: ").bold = True
             add_hyperlink(p, r['link'], r['link'])
             if r['description']:
-                if trans_lang:
-                    trans = await translator.translate(r['description'], trans_lang)
+                if need_translate:
+                    trans = await translator.translate_to_russian(r['description'])
                     if trans['was_translated']:
                         doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                     else:
@@ -1334,11 +1632,11 @@ async def collect_combined(user_id):
                         offset_rate=0,
                         offset_peer=None,
                         offset_id=0,
-                        limit=20
+                        limit=15
                     ))
                     
                     if hasattr(result, 'messages') and result.messages:
-                        for msg in result.messages[:10]:
+                        for msg in result.messages[:8]:
                             if stop_flags.get(user_id) or not hasattr(msg, 'message'):
                                 break
                             
@@ -1361,9 +1659,9 @@ async def collect_combined(user_id):
                             p.add_run(f"📅 {format_datetime_utc10(msg.date)}\n").bold = True
                             
                             if msg.message:
-                                text = msg.message[:1000]
-                                if trans_lang:
-                                    trans = await translator.translate(text, trans_lang)
+                                text = msg.message[:800]
+                                if need_translate:
+                                    trans = await translator.translate_to_russian(text)
                                     if trans['was_translated']:
                                         p.add_run(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                                     else:
@@ -1469,8 +1767,8 @@ if __name__ == '__main__':
     print("🤖 Бот запущен")
     print(f"👑 Админ: {ADMIN_ID}")
     print(f"📊 Каналов: {len(channels)}")
-    print(f"🌍 Перевод: есть")
+    print(f"🌍 Перевод: только на русский")
+    print(f"📤 Импорт/экспорт: Excel и TXT")
     print("=" * 40)
     
     executor.start_polling(dp, skip_updates=True)
-
