@@ -589,6 +589,15 @@ def get_custom_period_keyboard():
     kb.add(KeyboardButton("◀️ Назад"))
     return kb
 
+def get_image_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    kb.add(
+        KeyboardButton("🖼️ С картинками"),
+        KeyboardButton("📝 Только текст"),
+        KeyboardButton("◀️ Назад")
+    )
+    return kb
+
 def get_auth_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     kb.add(KeyboardButton("❌ Отмена"), KeyboardButton("◀️ Назад"))
