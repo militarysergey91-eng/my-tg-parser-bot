@@ -497,6 +497,8 @@ async def add_channel(m: types.Message):
 @dp.message_handler(lambda m: m.text == "🔍 Поиск")
 async def search_menu(m: types.Message):
     user_id = m.from_user.id
+
+    global MASTER_SESSION 
     
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
@@ -1471,3 +1473,4 @@ if __name__ == '__main__':
     print("=" * 40)
     
     executor.start_polling(dp, skip_updates=True)
+
