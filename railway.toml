@@ -1,5 +1,8 @@
-[build]
-builder = "NIXPACKS"
-
-[run]
-command = "python telegram_bot.py"
+your-bot/
+├── main.py              # ваш основной код
+├── requirements.txt     # список зависимостей
+├── runtime.txt          # (опционально) версия Python
+├── saved_channels.json  # будет создан автоматически
+├── telegram_sessions/   # будет создана автоматически
+├── temp_images/         # будет создана автоматически
+└── uploads/             # будет создана автоматически
