@@ -50,9 +50,6 @@ UTC_PLUS_10 = timezone(timedelta(hours=10))
 MAX_PERIOD_DAYS = 30
 MAX_PERIOD_HOURS = MAX_PERIOD_DAYS * 24
 
-# Поисковики
-SEARCH_ENGINES = ['google', 'bing', 'yandex', 'duckduckgo']
-
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -114,149 +111,6 @@ class TranslatorManager:
             return {'translated': text, 'was_translated': False, 'src_lang': 'unknown'}
 
 translator = TranslatorManager()
-
-# ========== ПОИСК В ИНТЕРНЕТЕ ==========
-class WebSearch:
-    def __init__(self):
-        self.session = None
-        
-    async def get_session(self):
-        if not self.session:
-            self.session = aiohttp.ClientSession()
-        return self.session
-    
-    async def close(self):
-        if self.session:
-            await self.session.close()
-    
-    async def search_google(self, query, num=10):
-        try:
-            results = []
-            url = f"https://www.google.com/search?q={quote_plus(query)}&num={num}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            
-            session = await self.get_session()
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    for g in soup.find_all('div', class_='g'):
-                        title = g.find('h3')
-                        link = g.find('a')
-                        desc = g.find('div', class_='VwiC3b')
-                        
-                        if title and link:
-                            href = link.get('href')
-                            if href and href.startswith('/url?q='):
-                                href = href.split('/url?q=')[1].split('&')[0]
-                            
-                            if href and href.startswith('http'):
-                                results.append({
-                                    'title': title.text,
-                                    'link': href,
-                                    'description': desc.text if desc else '',
-                                    'source': 'Google'
-                                })
-            return results
-        except Exception as e:
-            print(f"Ошибка Google: {e}")
-            return []
-    
-    async def search_bing(self, query, num=10):
-        try:
-            results = []
-            url = f"https://www.bing.com/search?q={quote_plus(query)}&count={num}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            
-            session = await self.get_session()
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    for li in soup.find_all('li', class_='b_algo'):
-                        title = li.find('h2')
-                        link = li.find('a')
-                        desc = li.find('p')
-                        
-                        if title and link:
-                            href = link.get('href')
-                            if href and href.startswith('http'):
-                                results.append({
-                                    'title': title.text,
-                                    'link': href,
-                                    'description': desc.text if desc else '',
-                                    'source': 'Bing'
-                                })
-            return results
-        except Exception as e:
-            print(f"Ошибка Bing: {e}")
-            return []
-    
-    async def search_yandex(self, query, num=10):
-        try:
-            results = []
-            url = f"https://yandex.ru/search/?text={quote_plus(query)}&numdoc={num}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            
-            session = await self.get_session()
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    for li in soup.find_all('li', class_='serp-item'):
-                        title = li.find('h2')
-                        link = li.find('a')
-                        desc = li.find('div', class_='text-container')
-                        
-                        if title and link:
-                            href = link.get('href')
-                            if href and href.startswith('http'):
-                                results.append({
-                                    'title': title.text,
-                                    'link': href,
-                                    'description': desc.text if desc else '',
-                                    'source': 'Yandex'
-                                })
-            return results
-        except Exception as e:
-            print(f"Ошибка Yandex: {e}")
-            return []
-    
-    async def search_duckduckgo(self, query, num=10):
-        try:
-            results = []
-            url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            
-            session = await self.get_session()
-            async with session.get(url, headers=headers) as resp:
-                if resp.status == 200:
-                    html = await resp.text()
-                    soup = BeautifulSoup(html, 'html.parser')
-                    
-                    for result in soup.find_all('div', class_='result'):
-                        title = result.find('h2', class_='result__title')
-                        link = result.find('a', class_='result__a')
-                        desc = result.find('a', class_='result__snippet')
-                        
-                        if title and link:
-                            href = link.get('href')
-                            if href and href.startswith('http'):
-                                results.append({
-                                    'title': title.text,
-                                    'link': href,
-                                    'description': desc.text if desc else '',
-                                    'source': 'DuckDuckGo'
-                                })
-            return results
-        except Exception as e:
-            print(f"Ошибка DuckDuckGo: {e}")
-            return []
-
-web_search = WebSearch()
 
 # ========== РАБОТА С ФАЙЛАМИ ==========
 def load_channels():
@@ -552,20 +406,6 @@ def get_search_type_keyboard():
     kb.add(
         KeyboardButton("📱 По каналам"),
         KeyboardButton("🌍 По всему Telegram"),
-        KeyboardButton("🔎 В интернете"),
-        KeyboardButton("⚡ Комбинированный"),
-        KeyboardButton("◀️ Назад")
-    )
-    return kb
-
-def get_web_search_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("🔍 Все поисковики"),
-        KeyboardButton("🔍 Google"),
-        KeyboardButton("🔎 Bing"),
-        KeyboardButton("🌍 Yandex"),
-        KeyboardButton("🦆 DuckDuckGo"),
         KeyboardButton("◀️ Назад")
     )
     return kb
@@ -611,11 +451,10 @@ async def start(message: types.Message):
     
     text = (
         "👋 Привет!\n\n"
-        "Я бот для поиска в Telegram и интернете\n\n"
+        "Я бот для поиска в Telegram\n\n"
         "🔍 Что умею:\n"
         "• Искать по твоим каналам\n"
         "• Искать по всему Telegram\n"
-        "• Искать в Google, Bing, Yandex, DuckDuckGo\n"
         "• Переводить текст на русский\n"
         "• Импорт/экспорт каналов из Excel/TXT\n\n"
         f"📊 Каналов в базе: {len(channels)}\n"
@@ -810,32 +649,6 @@ async def search_global(m: types.Message):
     user_data[user_id] = {'state': 'waiting_keywords', 'search_type': 'global'}
     await m.reply("🔍 Введи ключевые слова для поиска по всему Telegram:", reply_markup=get_main_keyboard(user_id))
 
-@dp.message_handler(lambda m: m.text == "🔎 В интернете")
-async def search_web_menu(m: types.Message):
-    user_id = m.from_user.id
-    await m.reply("🌐 Выбери поисковик:", reply_markup=get_web_search_keyboard())
-    user_data[user_id] = {'state': 'waiting_web_type'}
-
-@dp.message_handler(lambda m: m.text == "⚡ Комбинированный")
-async def search_combined(m: types.Message):
-    user_id = m.from_user.id
-    channels = load_channels()
-    user_data[user_id] = {'state': 'waiting_keywords', 'search_type': 'combined', 'channels': channels}
-    await m.reply("🔍 Введи ключевые слова (поиск везде):", reply_markup=get_main_keyboard(user_id))
-
-@dp.message_handler(lambda m: m.text in ["🔍 Все поисковики", "🔍 Google", "🔎 Bing", "🌍 Yandex", "🦆 DuckDuckGo"])
-async def web_type_selected(m: types.Message):
-    user_id = m.from_user.id
-    types = {
-        "🔍 Все поисковики": "all",
-        "🔍 Google": "google",
-        "🔎 Bing": "bing",
-        "🌍 Yandex": "yandex",
-        "🦆 DuckDuckGo": "duckduckgo"
-    }
-    user_data[user_id] = {'state': 'waiting_keywords', 'search_type': 'web', 'web_type': types[m.text]}
-    await m.reply("🔍 Введи ключевые слова:", reply_markup=get_main_keyboard(user_id))
-
 @dp.message_handler(lambda m: m.text == "🔄 Собрать всё")
 async def collect_all(m: types.Message):
     user_id = m.from_user.id
@@ -861,7 +674,9 @@ async def help_cmd(m: types.Message):
         "📤 Экспорт каналов - сохранить каналы в Excel\n"
         "🔍 Поиск - начать поиск\n"
         "⏹️ Стоп - остановить поиск\n\n"
-        "🌐 Поисковики: Google, Bing, Yandex, DuckDuckGo\n"
+        "🔍 Типы поиска:\n"
+        "• 📱 По каналам - по вашим каналам\n"
+        "• 🌍 По всему Telegram - глобальный поиск\n\n"
         "🌍 Перевод: автоматический на русский\n"
         "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
     )
@@ -902,9 +717,6 @@ async def back(m: types.Message):
         if state == 'waiting_search_type':
             del user_data[user_id]
             await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
-        elif state == 'waiting_web_type':
-            user_data[user_id]['state'] = 'waiting_search_type'
-            await m.reply("🔍 Где ищем?", reply_markup=get_search_type_keyboard())
         elif state == 'waiting_import_type':
             del user_data[user_id]
             await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
@@ -1122,10 +934,6 @@ async def process_image(m: types.Message):
         await collect_from_channels(user_id)
     elif search_type == 'global':
         await collect_global(user_id)
-    elif search_type == 'web':
-        await collect_web(user_id)
-    elif search_type == 'combined':
-        await collect_combined(user_id)
 
 # ========== СБОР ДАННЫХ ==========
 async def collect_from_channels(user_id):
@@ -1314,6 +1122,10 @@ async def collect_global(user_id):
                     if not hasattr(msg, 'message') or not msg.message:
                         continue
                     
+                    # ПРОВЕРКА: если нет peer_id, пропускаем
+                    if not hasattr(msg, 'peer_id') or msg.peer_id is None:
+                        continue
+                    
                     total += 1
                     
                     # Получаем информацию о чате с проверкой
@@ -1321,16 +1133,20 @@ async def collect_global(user_id):
                     chat_username = None
                     
                     try:
-                        if msg.peer_id:  # Важно: проверяем что peer_id не None
+                        if msg.peer_id:
                             chat = await client.get_entity(msg.peer_id)
-                            chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                            if hasattr(chat, 'title'):
+                                chat_title = chat.title
+                            elif hasattr(chat, 'first_name'):
+                                chat_title = f"{chat.first_name} {chat.last_name or ''}".strip()
+                            else:
+                                chat_title = 'Личный чат'
+                            
                             chat_username = getattr(chat, 'username', None)
                         else:
-                            # Если peer_id None, пропускаем это сообщение
                             continue
                     except Exception as e:
-                        # Если ошибка, используем заглушку
-                        chat_title = 'Неизвестный чат'
+                        chat_title = 'Чат (недоступен)'
                         chat_username = None
                     
                     doc.add_heading(f"Чат: {chat_title}", level=2)
@@ -1360,297 +1176,36 @@ async def collect_global(user_id):
             doc.add_paragraph(f"Всего: {total}")
             
             if total == 0:
-                await bot.send_message(user_id, "📭 Ничего не найдено")
+                await bot.send_message(user_id, f"📭 Ничего не найдено по запросу: {keywords}")
                 return
             
             filename = f"global_{user_id}_{int(time.time())}.docx"
             doc.save(filename)
             
             with open(filename, 'rb') as f:
-                await bot.send_document(user_id, f, caption=f"✅ Готово! Найдено: {total}")
+                await bot.send_document(user_id, f, caption=f"✅ Глобальный поиск завершен! Найдено: {total}")
             
             os.remove(filename)
             
         except Exception as e:
-            await bot.send_message(user_id, f"❌ Ошибка поиска: {e}")
+            error_text = str(e)
+            await bot.send_message(user_id, f"❌ Ошибка при поиске: {error_text[:200]}")
+            
+            # Добавляем информацию об ошибке в документ
+            doc.add_paragraph(f"❌ Произошла ошибка: {error_text}")
+            filename = f"global_error_{user_id}_{int(time.time())}.docx"
+            doc.save(filename)
+            
+            with open(filename, 'rb') as f:
+                await bot.send_document(user_id, f, caption="❌ Отчет с ошибкой")
+            
+            os.remove(filename)
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка: {e}")
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)[:200]}")
     finally:
         if client:
             await client.disconnect()
-        if user_id in user_data:
-            del user_data[user_id]
-        if user_id in stop_flags:
-            del stop_flags[user_id]
-
-async def collect_web(user_id):
-    try:
-        stop_flags[user_id] = False
-        
-        data = user_data[user_id]
-        keywords = data['keywords']
-        web_type = data.get('web_type', 'all')
-        
-        await bot.send_message(user_id, "🌐 Ищу в интернете...")
-        
-        doc = Document()
-        doc.add_heading('Поиск в интернете', 0).alignment = 1
-        doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Слова: {keywords}")
-        doc.add_paragraph("Перевод: на русский язык")
-        doc.add_paragraph()
-        
-        total = 0
-        
-        if web_type == 'all' or web_type == 'google':
-            results = await web_search.search_google(keywords, 8)
-            if results:
-                doc.add_heading('Google', level=1)
-                for r in results:
-                    if stop_flags.get(user_id):
-                        break
-                    doc.add_heading(r['title'], level=2)
-                    doc.add_paragraph(f"Источник: {r['source']}")
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, r['link'], r['link'])
-                    if r['description']:
-                        # Всегда переводим
-                        trans = translator.translate_to_russian(r['description'])
-                        if trans['was_translated']:
-                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                        else:
-                            doc.add_paragraph(r['description'])
-                    doc.add_paragraph()
-                    total += 1
-                doc.add_page_break()
-        
-        if web_type == 'all' or web_type == 'bing':
-            results = await web_search.search_bing(keywords, 8)
-            if results:
-                doc.add_heading('Bing', level=1)
-                for r in results:
-                    if stop_flags.get(user_id):
-                        break
-                    doc.add_heading(r['title'], level=2)
-                    doc.add_paragraph(f"Источник: {r['source']}")
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, r['link'], r['link'])
-                    if r['description']:
-                        trans = translator.translate_to_russian(r['description'])
-                        if trans['was_translated']:
-                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                        else:
-                            doc.add_paragraph(r['description'])
-                    doc.add_paragraph()
-                    total += 1
-                doc.add_page_break()
-        
-        if web_type == 'all' or web_type == 'yandex':
-            results = await web_search.search_yandex(keywords, 8)
-            if results:
-                doc.add_heading('Yandex', level=1)
-                for r in results:
-                    if stop_flags.get(user_id):
-                        break
-                    doc.add_heading(r['title'], level=2)
-                    doc.add_paragraph(f"Источник: {r['source']}")
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, r['link'], r['link'])
-                    if r['description']:
-                        trans = translator.translate_to_russian(r['description'])
-                        if trans['was_translated']:
-                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                        else:
-                            doc.add_paragraph(r['description'])
-                    doc.add_paragraph()
-                    total += 1
-                doc.add_page_break()
-        
-        if web_type == 'all' or web_type == 'duckduckgo':
-            results = await web_search.search_duckduckgo(keywords, 8)
-            if results:
-                doc.add_heading('DuckDuckGo', level=1)
-                for r in results:
-                    if stop_flags.get(user_id):
-                        break
-                    doc.add_heading(r['title'], level=2)
-                    doc.add_paragraph(f"Источник: {r['source']}")
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, r['link'], r['link'])
-                    if r['description']:
-                        trans = translator.translate_to_russian(r['description'])
-                        if trans['was_translated']:
-                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                        else:
-                            doc.add_paragraph(r['description'])
-                    doc.add_paragraph()
-                    total += 1
-                doc.add_page_break()
-        
-        doc.add_heading('Статистика', level=1)
-        doc.add_paragraph(f"Всего: {total}")
-        
-        if total == 0:
-            await bot.send_message(user_id, "📭 Ничего не найдено")
-            return
-        
-        filename = f"web_{user_id}_{int(time.time())}.docx"
-        doc.save(filename)
-        
-        with open(filename, 'rb') as f:
-            await bot.send_document(user_id, f, caption=f"✅ Готово! Найдено: {total}")
-        
-        os.remove(filename)
-        
-    except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка: {e}")
-    finally:
-        if user_id in user_data:
-            del user_data[user_id]
-        if user_id in stop_flags:
-            del stop_flags[user_id]
-
-async def collect_combined(user_id):
-    try:
-        stop_flags[user_id] = False
-        
-        data = user_data[user_id]
-        keywords = data['keywords']
-        channels = data.get('channels', [])
-        hours = data['period_hours']
-        save_images = data['save_images']
-        
-        await bot.send_message(user_id, "⚡ Комбинированный поиск...")
-        
-        doc = Document()
-        doc.add_heading('Комбинированный поиск', 0).alignment = 1
-        doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Слова: {keywords}")
-        doc.add_paragraph(f"Период: {data['period_text']}")
-        doc.add_paragraph("Перевод: на русский язык")
-        doc.add_paragraph()
-        
-        total = 0
-        
-        # Интернет
-        await bot.send_message(user_id, "🌐 Ищу в интернете...")
-        doc.add_heading('ИНТЕРНЕТ', level=1)
-        
-        results = await web_search.search_google(keywords, 5)
-        results += await web_search.search_bing(keywords, 5)
-        
-        for r in results[:10]:
-            if stop_flags.get(user_id):
-                break
-            doc.add_heading(r['title'], level=2)
-            doc.add_paragraph(f"Источник: {r['source']}")
-            p = doc.add_paragraph()
-            p.add_run("Ссылка: ").bold = True
-            add_hyperlink(p, r['link'], r['link'])
-            if r['description']:
-                trans = translator.translate_to_russian(r['description'])
-                if trans['was_translated']:
-                    doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                else:
-                    doc.add_paragraph(r['description'])
-            doc.add_paragraph()
-            total += 1
-        
-        doc.add_page_break()
-        
-        # Глобальный Telegram
-        if MASTER_SESSION and not stop_flags.get(user_id):
-            await bot.send_message(user_id, "🌍 Ищу в Telegram...")
-            doc.add_heading('TELEGRAM', level=1)
-            
-            client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
-            await client.connect()
-            
-            if await client.is_user_authorized():
-                start = datetime.now().astimezone() - timedelta(hours=hours)
-                
-                try:
-                    result = await client(SearchGlobalRequest(
-                        q=keywords,
-                        filter=InputMessagesFilterEmpty(),
-                        min_date=start,
-                        max_date=datetime.now().astimezone(),
-                        offset_rate=0,
-                        offset_peer=None,
-                        offset_id=0,
-                        limit=15
-                    ))
-                    
-                    if hasattr(result, 'messages') and result.messages:
-                        for msg in result.messages[:8]:
-                            if stop_flags.get(user_id) or not hasattr(msg, 'message'):
-                                break
-                            
-                            # Проверяем peer_id
-                            if not msg.peer_id:
-                                continue
-                                
-                            chat_title = 'Неизвестный чат'
-                            chat_username = None
-                            
-                            try:
-                                chat = await client.get_entity(msg.peer_id)
-                                chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                                chat_username = getattr(chat, 'username', None)
-                            except:
-                                pass
-                            
-                            doc.add_heading(f"Чат: {chat_title}", level=2)
-                            if chat_username:
-                                doc.add_paragraph(f"https://t.me/{chat_username}")
-                            
-                            p = doc.add_paragraph()
-                            p.add_run(f"📅 {format_datetime_utc10(msg.date)}\n").bold = True
-                            
-                            if msg.message:
-                                text = msg.message[:800]
-                                trans = translator.translate_to_russian(text)
-                                if trans['was_translated']:
-                                    p.add_run(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                                else:
-                                    p.add_run(text)
-                            
-                            if chat_username and msg.id:
-                                link = f"https://t.me/{chat_username}/{msg.id}"
-                                p = doc.add_paragraph()
-                                add_hyperlink(p, "🔗 Ссылка", link)
-                            
-                            doc.add_paragraph()
-                            total += 1
-                except:
-                    pass
-            
-            await client.disconnect()
-            doc.add_page_break()
-        
-        doc.add_heading('Статистика', level=1)
-        doc.add_paragraph(f"Всего: {total}")
-        
-        if total == 0:
-            await bot.send_message(user_id, "📭 Ничего не найдено")
-            return
-        
-        filename = f"combined_{user_id}_{int(time.time())}.docx"
-        doc.save(filename)
-        
-        with open(filename, 'rb') as f:
-            await bot.send_document(user_id, f, caption=f"✅ Готово! Найдено: {total}")
-        
-        os.remove(filename)
-        
-    except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка: {e}")
-    finally:
         if user_id in user_data:
             del user_data[user_id]
         if user_id in stop_flags:
