@@ -32,8 +32,6 @@ from docx.oxml.ns import qn
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import SearchGlobalRequest
-from telethon.tl.types import InputMessagesFilterEmpty
 
 # ========== НАСТРОЙКИ ==========
 API_TOKEN = '8029293386:AAG-Hih0eVun77YYcY8zf6PyDjQERmQCx9w'
@@ -432,15 +430,6 @@ def get_import_export_keyboard():
     )
     return kb
 
-def get_search_type_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("📱 По каналам"),
-        KeyboardButton("🌍 По всему Telegram"),
-        KeyboardButton("◀️ Назад в меню")
-    )
-    return kb
-
 def get_period_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
@@ -486,7 +475,6 @@ async def start(message: types.Message):
             "Я бот для поиска в Telegram\n\n"
             "🔍 Что умею:\n"
             "• Искать по каналам\n"
-            "• Искать по всему Telegram\n"
             "• Переводить текст на русский\n"
             "• Управлять каналами (добавлять, удалять)\n"
             "• Импорт/экспорт каналов из Excel/TXT\n\n"
@@ -499,7 +487,6 @@ async def start(message: types.Message):
             "🔍 Что умею:\n"
             "• Смотреть список каналов\n"
             "• Искать по каналам\n"
-            "• Искать по всему Telegram\n"
             "• Переводить текст на русский\n\n"
             f"📊 Доступно каналов: {len(channels)}\n"
         )
@@ -707,26 +694,14 @@ async def search_menu(m: types.Message):
         await start_auth(user_id, m)
         return
     
-    await m.reply("🔍 Где ищем?", reply_markup=get_search_type_keyboard())
-    user_data[user_id] = {'state': 'waiting_search_type'}
-
-@dp.message_handler(lambda m: m.text == "📱 По каналам")
-async def search_channels(m: types.Message):
-    user_id = m.from_user.id
+    # Проверяем есть ли каналы
     channels = load_channels()
-    
     if not channels:
-        await m.reply("❌ Сначала добавь каналы", reply_markup=get_main_keyboard(user_id))
+        await m.reply("❌ Нет доступных каналов для поиска", reply_markup=get_main_keyboard(user_id))
         return
     
-    user_data[user_id] = {'state': 'waiting_keywords', 'search_type': 'channels', 'channels': channels}
-    await m.reply("🔍 Введи ключевые слова:", reply_markup=get_main_keyboard(user_id))
-
-@dp.message_handler(lambda m: m.text == "🌍 По всему Telegram")
-async def search_global(m: types.Message):
-    user_id = m.from_user.id
-    user_data[user_id] = {'state': 'waiting_keywords', 'search_type': 'global'}
-    await m.reply("🔍 Введи ключевые слова для поиска по всему Telegram:", reply_markup=get_main_keyboard(user_id))
+    await m.reply("🔍 Введи ключевые слова для поиска:", reply_markup=get_main_keyboard(user_id))
+    user_data[user_id] = {'state': 'waiting_keywords', 'channels': channels}
 
 @dp.message_handler(lambda m: m.text == "🔄 Собрать всё")
 async def collect_all(m: types.Message):
@@ -740,7 +715,7 @@ async def collect_all(m: types.Message):
         await m.reply("❌ Нет каналов")
         return
     
-    user_data[user_id] = {'state': 'waiting_period', 'keywords': 'все', 'search_type': 'channels', 'channels': channels}
+    user_data[user_id] = {'state': 'waiting_period', 'keywords': 'все', 'channels': channels}
     await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
 
 @dp.message_handler(lambda m: m.text == "❓ Помощь")
@@ -754,7 +729,7 @@ async def help_cmd(m: types.Message):
             "➕ Добавить канал - добавить канал\n"
             "📥 Импорт каналов - загрузить из Excel/TXT\n"
             "📤 Экспорт каналов - сохранить в Excel\n"
-            "🔍 Поиск - начать поиск\n"
+            "🔍 Поиск - начать поиск по ключевым словам\n"
             "🔄 Собрать всё - все посты без фильтра\n"
             "⏹️ Стоп - остановить поиск\n"
             "🚪 Выйти - выйти из аккаунта\n\n"
@@ -765,11 +740,8 @@ async def help_cmd(m: types.Message):
         text = (
             "❓ Помощь\n\n"
             "📋 Список каналов - посмотреть доступные каналы\n"
-            "🔍 Поиск - начать поиск\n"
+            "🔍 Поиск - начать поиск по ключевым словам\n"
             "⏹️ Стоп - остановить поиск\n\n"
-            "🔍 Типы поиска:\n"
-            "• 📱 По каналам - по доступным каналам\n"
-            "• 🌍 По всему Telegram - глобальный поиск\n\n"
             "🌍 Перевод: автоматический на русский\n"
             "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
         )
@@ -1029,14 +1001,9 @@ async def process_image(m: types.Message):
     save_images = (text == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    search_type = user_data[user_id]['search_type']
-    
     await m.reply(f"🔍 Начинаю поиск...\nЭто может занять время", reply_markup=get_main_keyboard(user_id))
     
-    if search_type == 'channels':
-        await collect_from_channels(user_id)
-    elif search_type == 'global':
-        await collect_global(user_id)
+    await collect_from_channels(user_id)
 
 # ========== СБОР ДАННЫХ ==========
 async def collect_from_channels(user_id):
@@ -1051,6 +1018,10 @@ async def collect_from_channels(user_id):
         save_images = data['save_images']
         
         await bot.send_message(user_id, "🔄 Подключаюсь...")
+        
+        if not MASTER_SESSION:
+            await bot.send_message(user_id, "❌ Нет подключения к Telegram")
+            return
         
         client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
         await client.connect()
@@ -1140,8 +1111,15 @@ async def collect_from_channels(user_id):
                     doc.add_paragraph(f"✅ Найдено: {count}")
                     doc.add_page_break()
                 
+            except FloodWaitError as e:
+                wait = e.seconds
+                await bot.send_message(user_id, f"⚠️ Лимит запросов. Жду {wait} сек...")
+                await asyncio.sleep(wait)
+                continue
             except Exception as e:
                 await bot.send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+                doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']}")
+                doc.add_page_break()
         
         doc.add_heading('Статистика', level=1)
         doc.add_paragraph(f"Обработано: {processed}/{len(channels)}")
@@ -1163,167 +1141,6 @@ async def collect_from_channels(user_id):
         
     except Exception as e:
         await bot.send_message(user_id, f"❌ Ошибка: {e}")
-    finally:
-        if client:
-            await client.disconnect()
-        if user_id in user_data:
-            del user_data[user_id]
-        if user_id in stop_flags:
-            del stop_flags[user_id]
-
-async def collect_global(user_id):
-    """Глобальный поиск по всему Telegram (полностью исправлено)"""
-    client = None
-    try:
-        stop_flags[user_id] = False
-        
-        data = user_data[user_id]
-        keywords = data['keywords']
-        hours = data['period_hours']
-        save_images = data['save_images']
-        
-        await bot.send_message(user_id, "🔄 Подключаюсь...")
-        
-        client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
-        await client.connect()
-        
-        if not await client.is_user_authorized():
-            await bot.send_message(user_id, "❌ Сессия не активна")
-            return
-        
-        await bot.send_message(user_id, "🌍 Ищу по всему Telegram...")
-        
-        doc = Document()
-        doc.add_heading('Глобальный поиск в Telegram', 0).alignment = 1
-        doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Слова: {keywords}")
-        doc.add_paragraph(f"Период: {data['period_text']}")
-        doc.add_paragraph("Перевод: на русский язык")
-        doc.add_paragraph()
-        
-        start = datetime.now().astimezone() - timedelta(hours=hours)
-        
-        try:
-            result = await client(SearchGlobalRequest(
-                q=keywords,
-                filter=InputMessagesFilterEmpty(),
-                min_date=start,
-                max_date=datetime.now().astimezone(),
-                offset_rate=0,
-                offset_peer=None,
-                offset_id=0,
-                limit=50
-            ))
-            
-            total = 0
-            skipped = 0
-            
-            if hasattr(result, 'messages') and result.messages:
-                for msg in result.messages:
-                    if stop_flags.get(user_id):
-                        break
-                    
-                    # Пропускаем сообщения без текста
-                    if not hasattr(msg, 'message') or not msg.message:
-                        continue
-                    
-                    # ПРОВЕРКА: если нет peer_id, пропускаем
-                    if not hasattr(msg, 'peer_id') or msg.peer_id is None:
-                        skipped += 1
-                        continue
-                    
-                    total += 1
-                    
-                    # Получаем информацию о чате
-                    chat_title = 'Неизвестный чат'
-                    chat_username = None
-                    
-                    try:
-                        # Пытаемся получить информацию о чате
-                        chat = await client.get_entity(msg.peer_id)
-                        
-                        # Определяем название чата
-                        if hasattr(chat, 'title'):
-                            chat_title = chat.title
-                        elif hasattr(chat, 'first_name'):
-                            chat_title = f"{chat.first_name} {chat.last_name or ''}".strip()
-                        else:
-                            chat_title = 'Личный чат'
-                        
-                        chat_username = getattr(chat, 'username', None)
-                        
-                    except Exception as e:
-                        # Если не получается, используем заглушку
-                        chat_title = 'Чат (недоступен)'
-                        chat_username = None
-                    
-                    doc.add_heading(f"📢 {chat_title}", level=2)
-                    if chat_username:
-                        doc.add_paragraph(f"Ссылка: https://t.me/{chat_username}")
-                    
-                    p = doc.add_paragraph()
-                    p.add_run(f"📅 {format_datetime_utc10(msg.date)}\n").bold = True
-                    
-                    if msg.message:
-                        text = msg.message[:2000]
-                        # Переводим на русский
-                        trans = translator.translate_to_russian(text)
-                        if trans['was_translated']:
-                            p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
-                        else:
-                            p.add_run(text)
-                    
-                    # Добавляем ссылку если есть username и id
-                    if chat_username and msg.id:
-                        link = f"https://t.me/{chat_username}/{msg.id}"
-                        link_p = doc.add_paragraph()
-                        add_hyperlink(link_p, "🔗 Ссылка на сообщение", link)
-                    
-                    doc.add_paragraph()
-                    
-                    # Добавляем разделитель между сообщениями
-                    doc.add_paragraph("─" * 50)
-            
-            doc.add_heading('Статистика', level=1)
-            doc.add_paragraph(f"✅ Найдено сообщений: {total}")
-            if skipped > 0:
-                doc.add_paragraph(f"⚠️ Пропущено сообщений (без информации): {skipped}")
-            
-            if total == 0:
-                if skipped > 0:
-                    await bot.send_message(user_id, f"📭 Найдено {skipped} сообщений, но все без информации о чате")
-                else:
-                    await bot.send_message(user_id, f"📭 Ничего не найдено по запросу: {keywords}")
-                return
-            
-            filename = f"global_{user_id}_{int(time.time())}.docx"
-            doc.save(filename)
-            
-            with open(filename, 'rb') as f:
-                caption = f"✅ Глобальный поиск завершен!\n"
-                caption += f"📊 Найдено: {total}\n"
-                if skipped > 0:
-                    caption += f"⚠️ Пропущено: {skipped}"
-                await bot.send_document(user_id, f, caption=caption)
-            
-            os.remove(filename)
-            
-        except Exception as e:
-            error_text = str(e)
-            await bot.send_message(user_id, f"❌ Ошибка при поиске: {error_text[:200]}")
-            
-            # Добавляем информацию об ошибке в документ
-            doc.add_paragraph(f"❌ Произошла ошибка: {error_text}")
-            filename = f"global_error_{user_id}_{int(time.time())}.docx"
-            doc.save(filename)
-            
-            with open(filename, 'rb') as f:
-                await bot.send_document(user_id, f, caption="❌ Отчет с ошибкой")
-            
-            os.remove(filename)
-        
-    except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка: {str(e)[:200]}")
     finally:
         if client:
             await client.disconnect()
