@@ -377,18 +377,49 @@ def format_datetime_utc10(dt):
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id):
+    """Главная клавиатура - разная для админа и обычных пользователей"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("📋 Список каналов"),
-        KeyboardButton("➕ Добавить канал"),
-        KeyboardButton("📥 Импорт каналов"),
-        KeyboardButton("📤 Экспорт каналов"),
-        KeyboardButton("🔍 Поиск"),
-        KeyboardButton("❓ Помощь"),
-        KeyboardButton("⏹️ Стоп")
-    )
+    
     if is_admin(user_id):
-        kb.add(KeyboardButton("🔄 Собрать всё"), KeyboardButton("🚪 Выйти"))
+        # Для админа - полный функционал
+        kb.add(
+            KeyboardButton("📋 Список каналов"),
+            KeyboardButton("➕ Добавить канал"),
+            KeyboardButton("📥 Импорт каналов"),
+            KeyboardButton("📤 Экспорт каналов"),
+            KeyboardButton("🔍 Поиск"),
+            KeyboardButton("❓ Помощь"),
+            KeyboardButton("⏹️ Стоп"),
+            KeyboardButton("🔄 Собрать всё"),
+            KeyboardButton("🚪 Выйти")
+        )
+    else:
+        # Для обычных пользователей - только просмотр и поиск
+        kb.add(
+            KeyboardButton("📋 Список каналов"),
+            KeyboardButton("🔍 Поиск"),
+            KeyboardButton("❓ Помощь"),
+            KeyboardButton("⏹️ Стоп")
+        )
+    return kb
+
+def get_channels_menu_keyboard(user_id):
+    """Клавиатура для меню каналов"""
+    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    
+    if is_admin(user_id):
+        # Для админа - полное управление
+        kb.add(
+            KeyboardButton("➕ Добавить канал"),
+            KeyboardButton("📥 Импорт каналов"),
+            KeyboardButton("📤 Экспорт каналов"),
+            KeyboardButton("◀️ Назад в меню")
+        )
+    else:
+        # Для обычных пользователей - только просмотр
+        kb.add(
+            KeyboardButton("◀️ Назад в меню")
+        )
     return kb
 
 def get_import_export_keyboard():
@@ -406,7 +437,7 @@ def get_search_type_keyboard():
     kb.add(
         KeyboardButton("📱 По каналам"),
         KeyboardButton("🌍 По всему Telegram"),
-        KeyboardButton("◀️ Назад")
+        KeyboardButton("◀️ Назад в меню")
     )
     return kb
 
@@ -440,7 +471,7 @@ def get_image_keyboard():
 
 def get_auth_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    kb.add(KeyboardButton("❌ Отмена"), KeyboardButton("◀️ Назад"))
+    kb.add(KeyboardButton("❌ Отмена"), KeyboardButton("◀️ Назад в меню"))
     return kb
 
 # ========== КОМАНДЫ ==========
@@ -449,16 +480,29 @@ async def start(message: types.Message):
     user_id = message.from_user.id
     channels = load_channels()
     
-    text = (
-        "👋 Привет!\n\n"
-        "Я бот для поиска в Telegram\n\n"
-        "🔍 Что умею:\n"
-        "• Искать по твоим каналам\n"
-        "• Искать по всему Telegram\n"
-        "• Переводить текст на русский\n"
-        "• Импорт/экспорт каналов из Excel/TXT\n\n"
-        f"📊 Каналов в базе: {len(channels)}\n"
-    )
+    if is_admin(user_id):
+        text = (
+            "👋 Привет, Админ!\n\n"
+            "Я бот для поиска в Telegram\n\n"
+            "🔍 Что умею:\n"
+            "• Искать по каналам\n"
+            "• Искать по всему Telegram\n"
+            "• Переводить текст на русский\n"
+            "• Управлять каналами (добавлять, удалять)\n"
+            "• Импорт/экспорт каналов из Excel/TXT\n\n"
+            f"📊 Каналов в базе: {len(channels)}\n"
+        )
+    else:
+        text = (
+            "👋 Привет!\n\n"
+            "Я бот для поиска в Telegram\n\n"
+            "🔍 Что умею:\n"
+            "• Смотреть список каналов\n"
+            "• Искать по каналам\n"
+            "• Искать по всему Telegram\n"
+            "• Переводить текст на русский\n\n"
+            f"📊 Доступно каналов: {len(channels)}\n"
+        )
     
     if not MASTER_SESSION and is_admin(user_id):
         text += "\n⚠️ Нажми 🔍 Поиск для авторизации"
@@ -471,39 +515,70 @@ async def show_channels(m: types.Message):
     channels = load_channels()
     
     if not channels:
-        await m.reply("📭 Нет каналов", reply_markup=get_main_keyboard(user_id))
+        await m.reply("📭 Нет каналов", reply_markup=get_channels_menu_keyboard(user_id))
         return
     
+    # Создаем клавиатуру со списком каналов
     kb = InlineKeyboardMarkup(row_width=1)
+    
     for i, ch in enumerate(channels):
+        # Кнопка с названием канала (открывает ссылку)
         btn = InlineKeyboardButton(f"📢 {ch['name']}", url=ch['url'])
+        
         if is_admin(user_id):
+            # Для админа добавляем кнопку удаления
             del_btn = InlineKeyboardButton("❌", callback_data=f"del_{i}")
             kb.row(btn, del_btn)
         else:
+            # Для обычных пользователей только кнопка с ссылкой
             kb.add(btn)
     
     if is_admin(user_id):
         kb.add(InlineKeyboardButton("❌ Удалить все", callback_data="del_all"))
     
-    text = "📋 Каналы:\n" + "\n".join(f"{i+1}. {ch['name']}" for i, ch in enumerate(channels))
+    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
+    
+    # Формируем текст сообщения
+    text = "📋 Список каналов:\n\n"
+    for i, ch in enumerate(channels, 1):
+        text += f"{i}. {ch['name']}\n"
+    
+    text += f"\nВсего каналов: {len(channels)}"
+    
+    if not is_admin(user_id):
+        text += "\n\nℹ️ Нажми на название чтобы перейти"
+    
     await m.reply(text, reply_markup=kb)
 
 @dp.message_handler(lambda m: m.text == "➕ Добавить канал")
-async def add_channel(m: types.Message):
+async def add_channel_prompt(m: types.Message):
     user_id = m.from_user.id
+    
+    if not is_admin(user_id):
+        await m.reply("❌ Только администратор может добавлять каналы")
+        return
+    
     await m.reply("🔗 Отправь ссылку на канал\nПример: @durov или https://t.me/durov")
     user_data[user_id] = {'state': 'waiting_channel'}
 
 @dp.message_handler(lambda m: m.text == "📥 Импорт каналов")
 async def import_menu(m: types.Message):
     user_id = m.from_user.id
+    
+    if not is_admin(user_id):
+        await m.reply("❌ Только администратор может импортировать каналы")
+        return
+    
     await m.reply("📥 Выберите способ импорта:", reply_markup=get_import_export_keyboard())
     user_data[user_id] = {'state': 'waiting_import_type'}
 
 @dp.message_handler(lambda m: m.text == "📤 Экспорт каналов")
 async def export_channels(m: types.Message):
     user_id = m.from_user.id
+    
+    if not is_admin(user_id):
+        await m.reply("❌ Только администратор может экспортировать каналы")
+        return
     
     status_msg = await m.reply("🔄 Создаю Excel файл...")
     
@@ -548,6 +623,10 @@ async def import_txt_prompt(m: types.Message):
 @dp.message_handler(content_types=ContentType.DOCUMENT)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
+    
+    if not is_admin(user_id):
+        await message.reply("❌ Только администратор может загружать файлы")
+        return
     
     if user_id not in user_data:
         await message.reply("Сначала выберите действие в меню", reply_markup=get_main_keyboard(user_id))
@@ -666,20 +745,35 @@ async def collect_all(m: types.Message):
 
 @dp.message_handler(lambda m: m.text == "❓ Помощь")
 async def help_cmd(m: types.Message):
-    text = (
-        "❓ Помощь\n\n"
-        "📋 Список каналов - посмотреть каналы\n"
-        "➕ Добавить канал - добавить канал\n"
-        "📥 Импорт каналов - загрузить каналы из файла\n"
-        "📤 Экспорт каналов - сохранить каналы в Excel\n"
-        "🔍 Поиск - начать поиск\n"
-        "⏹️ Стоп - остановить поиск\n\n"
-        "🔍 Типы поиска:\n"
-        "• 📱 По каналам - по вашим каналам\n"
-        "• 🌍 По всему Telegram - глобальный поиск\n\n"
-        "🌍 Перевод: автоматический на русский\n"
-        "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
-    )
+    user_id = m.from_user.id
+    
+    if is_admin(user_id):
+        text = (
+            "❓ Помощь (Админ)\n\n"
+            "📋 Список каналов - просмотр и управление\n"
+            "➕ Добавить канал - добавить канал\n"
+            "📥 Импорт каналов - загрузить из Excel/TXT\n"
+            "📤 Экспорт каналов - сохранить в Excel\n"
+            "🔍 Поиск - начать поиск\n"
+            "🔄 Собрать всё - все посты без фильтра\n"
+            "⏹️ Стоп - остановить поиск\n"
+            "🚪 Выйти - выйти из аккаунта\n\n"
+            "🌍 Перевод: автоматический на русский\n"
+            "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
+        )
+    else:
+        text = (
+            "❓ Помощь\n\n"
+            "📋 Список каналов - посмотреть доступные каналы\n"
+            "🔍 Поиск - начать поиск\n"
+            "⏹️ Стоп - остановить поиск\n\n"
+            "🔍 Типы поиска:\n"
+            "• 📱 По каналам - по доступным каналам\n"
+            "• 🌍 По всему Telegram - глобальный поиск\n\n"
+            "🌍 Перевод: автоматический на русский\n"
+            "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
+        )
+    
     await m.reply(text)
 
 @dp.message_handler(lambda m: m.text == "⏹️ Стоп")
@@ -696,7 +790,7 @@ async def logout(m: types.Message):
         remove_master_session()
         if user_id in auth_data:
             del auth_data[user_id]
-        await m.reply("🚪 Вышел")
+        await m.reply("🚪 Вышел", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda m: m.text == "❌ Отмена")
 async def cancel(m: types.Message):
@@ -728,6 +822,15 @@ async def back(m: types.Message):
             await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
     else:
         await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda m: m.text == "◀️ Назад в меню")
+async def back_to_menu(m: types.Message):
+    user_id = m.from_user.id
+    
+    if user_id in user_data:
+        del user_data[user_id]
+    
+    await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
 
 # ========== АВТОРИЗАЦИЯ ==========
 async def start_auth(user_id, message):
@@ -882,7 +985,7 @@ async def process_period(m: types.Message):
     user_data[user_id]['period_hours'] = hours
     user_data[user_id]['period_text'] = text
     
-    # Переходим сразу к выбору формата, без выбора перевода
+    # Переходим сразу к выбору формата
     await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
     user_data[user_id]['state'] = 'waiting_image'
 
@@ -1069,7 +1172,7 @@ async def collect_from_channels(user_id):
             del stop_flags[user_id]
 
 async def collect_global(user_id):
-    """Глобальный поиск по всему Telegram (исправлено)"""
+    """Глобальный поиск по всему Telegram (полностью исправлено)"""
     client = None
     try:
         stop_flags[user_id] = False
@@ -1124,7 +1227,7 @@ async def collect_global(user_id):
                     if not hasattr(msg, 'message') or not msg.message:
                         continue
                     
-                    # ПРОВЕРКА: если нет peer_id, пропускаем и считаем
+                    # ПРОВЕРКА: если нет peer_id, пропускаем
                     if not hasattr(msg, 'peer_id') or msg.peer_id is None:
                         skipped += 1
                         continue
@@ -1244,14 +1347,14 @@ async def delete_callback(call):
     
     if data == "del_all":
         save_channels([])
-        await bot.send_message(user_id, "🗑 Все каналы удалены")
+        await bot.send_message(user_id, "🗑 Все каналы удалены", reply_markup=get_main_keyboard(user_id))
         return
     
     idx = int(data.split('_')[1])
     if idx < len(channels):
         deleted = channels.pop(idx)
         save_channels(channels)
-        await bot.send_message(user_id, f"🗑 Удален: {deleted['name']}")
+        await bot.send_message(user_id, f"🗑 Удален: {deleted['name']}", reply_markup=get_main_keyboard(user_id))
 
 @dp.callback_query_handler(lambda c: c.data == 'back_to_main')
 async def back_callback(call):
@@ -1277,8 +1380,11 @@ async def unknown(m: types.Message):
         return
     
     if m.text and ('t.me/' in m.text or '@' in m.text):
-        user_data[user_id] = {'state': 'waiting_channel'}
-        await process_channel(m)
+        if is_admin(user_id):
+            user_data[user_id] = {'state': 'waiting_channel'}
+            await process_channel(m)
+        else:
+            await m.reply("❌ Только администратор может добавлять каналы")
     else:
         await m.reply("Используй кнопки 👇", reply_markup=get_main_keyboard(user_id))
 
@@ -1287,14 +1393,11 @@ if __name__ == '__main__':
     MASTER_SESSION = load_master_session()
     channels = load_channels()
     
-    print("=" * 40)
+    print("=" * 50)
     print("🤖 Бот запущен")
-    print(f"👑 Админ: {ADMIN_ID}")
-    print(f"📊 Каналов: {len(channels)}")
+    print(f"👑 Админ ID: {ADMIN_ID}")
+    print(f"📊 Каналов в базе: {len(channels)}")
     print(f"🌍 Перевод: всегда на русский")
-    print(f"📥 Импорт: Excel и TXT")
-    print(f"📤 Экспорт: Excel")
-    print("=" * 40)
+    print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
-
