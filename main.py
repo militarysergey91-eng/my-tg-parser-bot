@@ -1113,77 +1113,95 @@ async def collect_global(user_id):
             ))
             
             total = 0
+            skipped = 0
             
             if hasattr(result, 'messages') and result.messages:
                 for msg in result.messages:
                     if stop_flags.get(user_id):
                         break
                     
+                    # Пропускаем сообщения без текста
                     if not hasattr(msg, 'message') or not msg.message:
                         continue
                     
-                    # ПРОВЕРКА: если нет peer_id, пропускаем
+                    # ПРОВЕРКА: если нет peer_id, пропускаем и считаем
                     if not hasattr(msg, 'peer_id') or msg.peer_id is None:
+                        skipped += 1
                         continue
                     
                     total += 1
                     
-                    # Получаем информацию о чате с проверкой
+                    # Получаем информацию о чате
                     chat_title = 'Неизвестный чат'
                     chat_username = None
                     
                     try:
-                        if msg.peer_id:
-                            chat = await client.get_entity(msg.peer_id)
-                            if hasattr(chat, 'title'):
-                                chat_title = chat.title
-                            elif hasattr(chat, 'first_name'):
-                                chat_title = f"{chat.first_name} {chat.last_name or ''}".strip()
-                            else:
-                                chat_title = 'Личный чат'
-                            
-                            chat_username = getattr(chat, 'username', None)
+                        # Пытаемся получить информацию о чате
+                        chat = await client.get_entity(msg.peer_id)
+                        
+                        # Определяем название чата
+                        if hasattr(chat, 'title'):
+                            chat_title = chat.title
+                        elif hasattr(chat, 'first_name'):
+                            chat_title = f"{chat.first_name} {chat.last_name or ''}".strip()
                         else:
-                            continue
+                            chat_title = 'Личный чат'
+                        
+                        chat_username = getattr(chat, 'username', None)
+                        
                     except Exception as e:
+                        # Если не получается, используем заглушку
                         chat_title = 'Чат (недоступен)'
                         chat_username = None
                     
-                    doc.add_heading(f"Чат: {chat_title}", level=2)
+                    doc.add_heading(f"📢 {chat_title}", level=2)
                     if chat_username:
-                        doc.add_paragraph(f"https://t.me/{chat_username}")
+                        doc.add_paragraph(f"Ссылка: https://t.me/{chat_username}")
                     
                     p = doc.add_paragraph()
                     p.add_run(f"📅 {format_datetime_utc10(msg.date)}\n").bold = True
                     
                     if msg.message:
                         text = msg.message[:2000]
-                        # Всегда переводим на русский
+                        # Переводим на русский
                         trans = translator.translate_to_russian(text)
                         if trans['was_translated']:
                             p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
                         else:
                             p.add_run(text)
                     
+                    # Добавляем ссылку если есть username и id
                     if chat_username and msg.id:
                         link = f"https://t.me/{chat_username}/{msg.id}"
-                        p = doc.add_paragraph()
-                        add_hyperlink(p, "🔗 Ссылка", link)
+                        link_p = doc.add_paragraph()
+                        add_hyperlink(link_p, "🔗 Ссылка на сообщение", link)
                     
                     doc.add_paragraph()
+                    
+                    # Добавляем разделитель между сообщениями
+                    doc.add_paragraph("─" * 50)
             
             doc.add_heading('Статистика', level=1)
-            doc.add_paragraph(f"Всего: {total}")
+            doc.add_paragraph(f"✅ Найдено сообщений: {total}")
+            if skipped > 0:
+                doc.add_paragraph(f"⚠️ Пропущено сообщений (без информации): {skipped}")
             
             if total == 0:
-                await bot.send_message(user_id, f"📭 Ничего не найдено по запросу: {keywords}")
+                if skipped > 0:
+                    await bot.send_message(user_id, f"📭 Найдено {skipped} сообщений, но все без информации о чате")
+                else:
+                    await bot.send_message(user_id, f"📭 Ничего не найдено по запросу: {keywords}")
                 return
             
             filename = f"global_{user_id}_{int(time.time())}.docx"
             doc.save(filename)
             
             with open(filename, 'rb') as f:
-                await bot.send_document(user_id, f, caption=f"✅ Глобальный поиск завершен! Найдено: {total}")
+                caption = f"✅ Глобальный поиск завершен!\n"
+                caption += f"📊 Найдено: {total}\n"
+                if skipped > 0:
+                    caption += f"⚠️ Пропущено: {skipped}"
+                await bot.send_document(user_id, f, caption=caption)
             
             os.remove(filename)
             
@@ -1279,3 +1297,4 @@ if __name__ == '__main__':
     print("=" * 40)
     
     executor.start_polling(dp, skip_updates=True)
+
