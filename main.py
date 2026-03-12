@@ -67,7 +67,7 @@ auth_data = {}
 stop_flags = {}
 MASTER_SESSION = None
 
-# ========== ПЕРЕВОД НА РУССКИЙ ==========
+# ========== ПЕРЕВОД НА РУССКИЙ (ВСЕГДА) ==========
 class TranslatorManager:
     def __init__(self):
         self.translator = Translator()
@@ -83,8 +83,8 @@ class TranslatorManager:
     def get_language_name(self, code):
         return LANGUAGES.get(code, code)
     
-    async def translate_to_russian(self, text):
-        """Переводит текст на русский язык"""
+    def translate_to_russian(self, text):
+        """Переводит текст на русский язык (синхронно)"""
         try:
             if not text or len(text) < 10:
                 return {'translated': text, 'was_translated': False, 'src_lang': 'unknown'}
@@ -96,8 +96,8 @@ class TranslatorManager:
             if src == 'ru' or src == 'unknown':
                 return {'translated': text, 'was_translated': False, 'src_lang': src}
             
-            # Переводим
-            result = await self.translator.translate(text[:5000], dest='ru', src=src)
+            # Переводим (без await!)
+            result = self.translator.translate(text[:5000], dest='ru', src=src)
             
             if result and result.text:
                 return {
@@ -589,24 +589,6 @@ def get_custom_period_keyboard():
     kb.add(KeyboardButton("◀️ Назад"))
     return kb
 
-def get_translation_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("🇷🇺 Перевести на русский"),
-        KeyboardButton("🔄 Без перевода"),
-        KeyboardButton("◀️ Назад")
-    )
-    return kb
-
-def get_image_keyboard():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("🖼️ С картинками"),
-        KeyboardButton("📝 Только текст"),
-        KeyboardButton("◀️ Назад")
-    )
-    return kb
-
 def get_auth_keyboard():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     kb.add(KeyboardButton("❌ Отмена"), KeyboardButton("◀️ Назад"))
@@ -1079,8 +1061,9 @@ async def process_period(m: types.Message):
     user_data[user_id]['period_hours'] = hours
     user_data[user_id]['period_text'] = text
     
-    await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
-    user_data[user_id]['state'] = 'waiting_translation'
+    # Переходим сразу к выбору формата, без выбора перевода
+    await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
+    user_data[user_id]['state'] = 'waiting_image'
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_custom_period')
 async def process_custom_period(m: types.Message):
@@ -1105,27 +1088,7 @@ async def process_custom_period(m: types.Message):
     user_data[user_id]['period_hours'] = hours
     user_data[user_id]['period_text'] = text
     
-    await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
-    user_data[user_id]['state'] = 'waiting_translation'
-
-@dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_translation')
-async def process_translation(m: types.Message):
-    user_id = m.from_user.id
-    text = m.text
-    
-    if text == "◀️ Назад":
-        await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
-        user_data[user_id]['state'] = 'waiting_period'
-        return
-    
-    if text == "🇷🇺 Перевести на русский":
-        user_data[user_id]['translate'] = True
-    elif text == "🔄 Без перевода":
-        user_data[user_id]['translate'] = False
-    else:
-        await m.reply("❌ Выбери из кнопок")
-        return
-    
+    # Переходим сразу к выбору формата
     await m.reply("🖼️ Выбери формат:", reply_markup=get_image_keyboard())
     user_data[user_id]['state'] = 'waiting_image'
 
@@ -1135,8 +1098,8 @@ async def process_image(m: types.Message):
     text = m.text
     
     if text == "◀️ Назад":
-        await m.reply("🌍 Выбери настройки перевода:", reply_markup=get_translation_keyboard())
-        user_data[user_id]['state'] = 'waiting_translation'
+        await m.reply("⏱ За какой период?", reply_markup=get_period_keyboard())
+        user_data[user_id]['state'] = 'waiting_period'
         return
     
     save_images = (text == "🖼️ С картинками")
@@ -1166,7 +1129,6 @@ async def collect_from_channels(user_id):
         channels = data['channels']
         hours = data['period_hours']
         save_images = data['save_images']
-        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🔄 Подключаюсь...")
         
@@ -1182,8 +1144,7 @@ async def collect_from_channels(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
-        if need_translate:
-            doc.add_paragraph("Перевод: на русский язык")
+        doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
@@ -1235,12 +1196,10 @@ async def collect_from_channels(user_id):
                         
                         if msg.text:
                             text = msg.text[:3000]
-                            if need_translate:
-                                trans = await translator.translate_to_russian(text)
-                                if trans['was_translated']:
-                                    p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
-                                else:
-                                    p.add_run(text)
+                            # Всегда переводим на русский
+                            trans = translator.translate_to_russian(text)
+                            if trans['was_translated']:
+                                p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
                             else:
                                 p.add_run(text)
                         
@@ -1293,7 +1252,7 @@ async def collect_from_channels(user_id):
             del stop_flags[user_id]
 
 async def collect_global(user_id):
-    """Глобальный поиск по всему Telegram"""
+    """Глобальный поиск по всему Telegram (исправлено)"""
     client = None
     try:
         stop_flags[user_id] = False
@@ -1302,7 +1261,6 @@ async def collect_global(user_id):
         keywords = data['keywords']
         hours = data['period_hours']
         save_images = data['save_images']
-        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🔄 Подключаюсь...")
         
@@ -1320,8 +1278,7 @@ async def collect_global(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
-        if need_translate:
-            doc.add_paragraph("Перевод: на русский язык")
+        doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         start = datetime.now().astimezone() - timedelta(hours=hours)
@@ -1355,12 +1312,17 @@ async def collect_global(user_id):
                     chat_username = None
                     
                     try:
-                        if msg.peer_id:
+                        if msg.peer_id:  # Важно: проверяем что peer_id не None
                             chat = await client.get_entity(msg.peer_id)
                             chat_title = getattr(chat, 'title', 'Неизвестный чат')
                             chat_username = getattr(chat, 'username', None)
-                    except:
-                        pass
+                        else:
+                            # Если peer_id None, пропускаем это сообщение
+                            continue
+                    except Exception as e:
+                        # Если ошибка, используем заглушку
+                        chat_title = 'Неизвестный чат'
+                        chat_username = None
                     
                     doc.add_heading(f"Чат: {chat_title}", level=2)
                     if chat_username:
@@ -1371,12 +1333,10 @@ async def collect_global(user_id):
                     
                     if msg.message:
                         text = msg.message[:2000]
-                        if need_translate:
-                            trans = await translator.translate_to_russian(text)
-                            if trans['was_translated']:
-                                p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
-                            else:
-                                p.add_run(text)
+                        # Всегда переводим на русский
+                        trans = translator.translate_to_russian(text)
+                        if trans['was_translated']:
+                            p.add_run(f"[Переведено с {trans['src_name']}]\n\n{trans['translated']}")
                         else:
                             p.add_run(text)
                     
@@ -1422,7 +1382,6 @@ async def collect_web(user_id):
         data = user_data[user_id]
         keywords = data['keywords']
         web_type = data.get('web_type', 'all')
-        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "🌐 Ищу в интернете...")
         
@@ -1430,8 +1389,7 @@ async def collect_web(user_id):
         doc.add_heading('Поиск в интернете', 0).alignment = 1
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
-        if need_translate:
-            doc.add_paragraph("Перевод: на русский язык")
+        doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
@@ -1449,12 +1407,10 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if need_translate:
-                            trans = await translator.translate_to_russian(r['description'])
-                            if trans['was_translated']:
-                                doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                            else:
-                                doc.add_paragraph(r['description'])
+                        # Всегда переводим
+                        trans = translator.translate_to_russian(r['description'])
+                        if trans['was_translated']:
+                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                         else:
                             doc.add_paragraph(r['description'])
                     doc.add_paragraph()
@@ -1474,12 +1430,9 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if need_translate:
-                            trans = await translator.translate_to_russian(r['description'])
-                            if trans['was_translated']:
-                                doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                            else:
-                                doc.add_paragraph(r['description'])
+                        trans = translator.translate_to_russian(r['description'])
+                        if trans['was_translated']:
+                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                         else:
                             doc.add_paragraph(r['description'])
                     doc.add_paragraph()
@@ -1499,12 +1452,9 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if need_translate:
-                            trans = await translator.translate_to_russian(r['description'])
-                            if trans['was_translated']:
-                                doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                            else:
-                                doc.add_paragraph(r['description'])
+                        trans = translator.translate_to_russian(r['description'])
+                        if trans['was_translated']:
+                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                         else:
                             doc.add_paragraph(r['description'])
                     doc.add_paragraph()
@@ -1524,12 +1474,9 @@ async def collect_web(user_id):
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, r['link'], r['link'])
                     if r['description']:
-                        if need_translate:
-                            trans = await translator.translate_to_russian(r['description'])
-                            if trans['was_translated']:
-                                doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                            else:
-                                doc.add_paragraph(r['description'])
+                        trans = translator.translate_to_russian(r['description'])
+                        if trans['was_translated']:
+                            doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                         else:
                             doc.add_paragraph(r['description'])
                     doc.add_paragraph()
@@ -1568,7 +1515,6 @@ async def collect_combined(user_id):
         channels = data.get('channels', [])
         hours = data['period_hours']
         save_images = data['save_images']
-        need_translate = data.get('translate', False)
         
         await bot.send_message(user_id, "⚡ Комбинированный поиск...")
         
@@ -1577,8 +1523,7 @@ async def collect_combined(user_id):
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Слова: {keywords}")
         doc.add_paragraph(f"Период: {data['period_text']}")
-        if need_translate:
-            doc.add_paragraph("Перевод: на русский язык")
+        doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
         
         total = 0
@@ -1599,12 +1544,9 @@ async def collect_combined(user_id):
             p.add_run("Ссылка: ").bold = True
             add_hyperlink(p, r['link'], r['link'])
             if r['description']:
-                if need_translate:
-                    trans = await translator.translate_to_russian(r['description'])
-                    if trans['was_translated']:
-                        doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                    else:
-                        doc.add_paragraph(r['description'])
+                trans = translator.translate_to_russian(r['description'])
+                if trans['was_translated']:
+                    doc.add_paragraph(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                 else:
                     doc.add_paragraph(r['description'])
             doc.add_paragraph()
@@ -1640,14 +1582,17 @@ async def collect_combined(user_id):
                             if stop_flags.get(user_id) or not hasattr(msg, 'message'):
                                 break
                             
+                            # Проверяем peer_id
+                            if not msg.peer_id:
+                                continue
+                                
                             chat_title = 'Неизвестный чат'
                             chat_username = None
                             
                             try:
-                                if msg.peer_id:
-                                    chat = await client.get_entity(msg.peer_id)
-                                    chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                                    chat_username = getattr(chat, 'username', None)
+                                chat = await client.get_entity(msg.peer_id)
+                                chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                                chat_username = getattr(chat, 'username', None)
                             except:
                                 pass
                             
@@ -1660,12 +1605,9 @@ async def collect_combined(user_id):
                             
                             if msg.message:
                                 text = msg.message[:800]
-                                if need_translate:
-                                    trans = await translator.translate_to_russian(text)
-                                    if trans['was_translated']:
-                                        p.add_run(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
-                                    else:
-                                        p.add_run(text)
+                                trans = translator.translate_to_russian(text)
+                                if trans['was_translated']:
+                                    p.add_run(f"[Переведено с {trans['src_name']}]\n{trans['translated']}")
                                 else:
                                     p.add_run(text)
                             
@@ -1767,7 +1709,7 @@ if __name__ == '__main__':
     print("🤖 Бот запущен")
     print(f"👑 Админ: {ADMIN_ID}")
     print(f"📊 Каналов: {len(channels)}")
-    print(f"🌍 Перевод: только на русский")
+    print(f"🌍 Перевод: всегда на русский")
     print(f"📥 Импорт: Excel и TXT")
     print(f"📤 Экспорт: Excel")
     print("=" * 40)
