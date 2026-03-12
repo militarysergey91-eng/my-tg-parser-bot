@@ -7,15 +7,31 @@ import re
 import time
 import sys
 import signal
+import hashlib
+import hmac
+from collections import defaultdict
+from ipaddress import ip_address
+from typing import Dict, List, Optional, Tuple
+import html
+import random
+
 from PIL import Image
 import pandas as pd
 import openpyxl
 import aiohttp
 from bs4 import BeautifulSoup
 import requests
-from urllib.parse import quote_plus, urlparse
-import html
+from urllib.parse import quote_plus, urlparse, urljoin
 import xml.etree.ElementTree as ET
+
+# Для перевода
+try:
+    from googletrans import Translator, LANGUAGES
+    import langdetect
+    TRANSLATION_AVAILABLE = True
+except ImportError:
+    TRANSLATION_AVAILABLE = False
+    print("⚠️ Библиотеки для перевода не установлены. Установите: pip install googletrans==4.0.0-rc1 langdetect")
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.contrib.middlewares.logging import LoggingMiddleware
@@ -33,27 +49,21 @@ from telethon.tl.functions.messages import SearchGlobalRequest
 from telethon.tl.types import InputMessagesFilterEmpty, InputMessagesFilterPhotos, InputMessagesFilterDocument, InputMessagesFilterVideo
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel
 
-# ========== НАСТРОЙКИ ==========
-API_TOKEN = '8029293386:AAG-Hih0eVun77YYcY8zf6PyDjQERmQCx9w'  # Твой токен
+# ========== НАСТРОЙКИ БЕЗОПАСНОСТИ ==========
+# В продакшене используй переменные окружения!
+API_TOKEN = os.environ.get('BOT_TOKEN', '8029293386:AAG-Hih0eVun77YYcY8zf6PyDjQERmQCx9w')
+API_ID = int(os.environ.get('API_ID', '38892524'))
+API_HASH = os.environ.get('API_HASH', 'd71ef1a657ab20d2a47a52130626c939')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '5224743551'))
+SECRET_KEY = os.environ.get('SECRET_KEY', 'default-secret-key-change-this-in-production')
 
-# Данные от Telegram API
-API_ID = 38892524
-API_HASH = 'd71ef1a657ab20d2a47a52130626c939'
-
-# Файл для хранения списка каналов (общий для всех пользователей)
+# Файлы для хранения данных
 CHANNELS_FILE = 'saved_channels.json'
-
-# Файл для хранения сессий в текстовом формате
 SESSIONS_DIR = 'telegram_sessions'
-
-# Папка для временного хранения изображений
 IMAGES_DIR = 'temp_images'
-
-# Папка для загруженных файлов
 UPLOADS_DIR = 'uploads'
-
-# ID администратора (твой ID)
-ADMIN_ID = 5224743551
+SECURITY_LOG_FILE = 'security_logs.json'
+BLOCKED_IPS_FILE = 'blocked_ips.json'
 
 # Часовой пояс UTC+10
 UTC_PLUS_10 = timezone(timedelta(hours=10))
@@ -63,11 +73,29 @@ MAX_PERIOD_DAYS = 30
 MAX_PERIOD_HOURS = MAX_PERIOD_DAYS * 24
 
 # Настройки для поиска в интернете
-MAX_WEB_RESULTS = 50  # Максимальное количество результатов из интернета
-SEARCH_ENGINES = ['google', 'bing']  # Доступные поисковики
-MAX_SEARCH_TIME = 60  # Максимальное время поиска в секундах
+MAX_WEB_RESULTS = 100
+SEARCH_ENGINES = ['google', 'bing', 'yahoo', 'yandex', 'duckduckgo', 'baidu', 'ask']
+MAX_SEARCH_TIME = 120
 
-# Создаем папки, если их нет
+# Настройки безопасности
+SECURITY_SETTINGS = {
+    'rate_limiting': True,
+    'max_requests_per_minute': 60,
+    'brute_force_protection': True,
+    'max_auth_attempts': 5,
+    'max_code_attempts': 3,
+    'lockout_minutes': 5,
+    'input_validation': True,
+    'max_text_length': 5000,
+    'sql_injection_protection': True,
+    'xss_protection': True,
+    'validate_telegram_ua': True,
+    'log_suspicious': True,
+    'log_failed_attempts': True,
+    'notify_admin_on_attack': True
+}
+
+# Создаем папки
 os.makedirs(SESSIONS_DIR, exist_ok=True)
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -87,48 +115,615 @@ logging.basicConfig(level=logging.INFO)
 
 # Временное хранилище для данных пользователя
 user_data = {}
-auth_data = {}  # Для хранения временных данных авторизации (только для админа)
-stop_flags = {}  # Флаги для остановки формирования отчета
+auth_data = {}
+stop_flags = {}
 
-# Глобальная сессия для всех пользователей
+# Глобальная сессия
 MASTER_SESSION = None
+
+# ========== СИСТЕМА БЕЗОПАСНОСТИ ==========
+class SecurityManager:
+    """Менеджер безопасности для защиты бота"""
+    
+    def __init__(self):
+        self.request_counts = defaultdict(list)
+        self.auth_attempts = defaultdict(list)
+        self.code_attempts = defaultdict(list)
+        self.blocked_users = {}
+        self.blocked_ips = self._load_blocked_ips()
+        self.security_logs = self._load_security_logs()
+        
+    def _load_blocked_ips(self):
+        if os.path.exists(BLOCKED_IPS_FILE):
+            with open(BLOCKED_IPS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    
+    def _save_blocked_ips(self):
+        with open(BLOCKED_IPS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.blocked_ips, f, ensure_ascii=False, indent=2)
+    
+    def _load_security_logs(self):
+        if os.path.exists(SECURITY_LOG_FILE):
+            with open(SECURITY_LOG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return []
+    
+    def _save_security_logs(self):
+        with open(SECURITY_LOG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(self.security_logs[-1000:], f, ensure_ascii=False, indent=2)
+    
+    def log_security_event(self, event_type: str, user_id: int, details: str, ip: str = None):
+        if not SECURITY_SETTINGS['log_suspicious']:
+            return
+            
+        log_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'event_type': event_type,
+            'user_id': user_id,
+            'ip': ip or 'unknown',
+            'details': details
+        }
+        self.security_logs.append(log_entry)
+        self._save_security_logs()
+        
+        if SECURITY_SETTINGS['notify_admin_on_attack'] and 'attack' in event_type.lower():
+            asyncio.create_task(self._notify_admin(log_entry))
+    
+    async def _notify_admin(self, log_entry: dict):
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🚨 *Обнаружена атака!*\n\n"
+                f"Тип: {log_entry['event_type']}\n"
+                f"Пользователь: {log_entry['user_id']}\n"
+                f"IP: {log_entry['ip']}\n"
+                f"Время: {log_entry['timestamp']}\n"
+                f"Детали: {log_entry['details']}",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+    
+    def check_rate_limit(self, user_id: int) -> bool:
+        if not SECURITY_SETTINGS['rate_limiting']:
+            return True
+            
+        now = time.time()
+        minute_ago = now - 60
+        
+        self.request_counts[user_id] = [t for t in self.request_counts[user_id] if t > minute_ago]
+        
+        if len(self.request_counts[user_id]) >= SECURITY_SETTINGS['max_requests_per_minute']:
+            self.log_security_event('rate_limit_exceeded', user_id, f'Превышен лимит запросов')
+            return False
+            
+        self.request_counts[user_id].append(now)
+        return True
+    
+    def check_brute_force(self, user_id: int, attempt_type: str = 'auth') -> bool:
+        if not SECURITY_SETTINGS['brute_force_protection']:
+            return True
+            
+        now = time.time()
+        
+        if user_id in self.blocked_users:
+            if now < self.blocked_users[user_id]:
+                return False
+            else:
+                del self.blocked_users[user_id]
+        
+        attempts_list = self.auth_attempts if attempt_type == 'auth' else self.code_attempts
+        max_attempts = SECURITY_SETTINGS['max_auth_attempts'] if attempt_type == 'auth' else SECURITY_SETTINGS['max_code_attempts']
+        
+        attempts = attempts_list[user_id]
+        attempts = [t for t in attempts if t > now - 1800]
+        
+        if len(attempts) >= max_attempts:
+            lockout_time = now + (SECURITY_SETTINGS['lockout_minutes'] * 60)
+            self.blocked_users[user_id] = lockout_time
+            self.log_security_event(f'brute_force_attack_{attempt_type}', user_id, f'Заблокирован')
+            return False
+        
+        attempts.append(now)
+        attempts_list[user_id] = attempts
+        return True
+    
+    def validate_input(self, text: str, max_length: int = None) -> Tuple[bool, str]:
+        if not SECURITY_SETTINGS['input_validation']:
+            return True, text
+            
+        max_len = max_length or SECURITY_SETTINGS['max_text_length']
+        if len(text) > max_len:
+            return False, f"Текст слишком длинный (макс. {max_len} символов)"
+        
+        if SECURITY_SETTINGS['sql_injection_protection']:
+            sql_patterns = [
+                r'\bSELECT\b.*\bFROM\b', r'\bINSERT\b.*\bINTO\b', r'\bUPDATE\b.*\bSET\b',
+                r'\bDELETE\b.*\bFROM\b', r'\bDROP\b.*\bTABLE\b', r'\bUNION\b.*\bSELECT\b',
+                r'--', r';'
+            ]
+            for pattern in sql_patterns:
+                if re.search(pattern, text, re.IGNORECASE):
+                    self.log_security_event('sql_injection_attempt', 0, 'Обнаружена SQL-инъекция')
+                    return False, "Обнаружена потенциальная SQL-инъекция"
+        
+        if SECURITY_SETTINGS['xss_protection']:
+            xss_patterns = [
+                r'<script.*?>.*?</script>', r'javascript:', r'on\w+\s*=',
+                r'<.*?on\w+.*?>', r'<iframe.*?>', r'<object.*?>'
+            ]
+            for pattern in xss_patterns:
+                if re.search(pattern, text, re.IGNORECASE | re.DOTALL):
+                    self.log_security_event('xss_attempt', 0, 'Обнаружена XSS-атака')
+                    return False, "Обнаружена потенциальная XSS-атака"
+            
+            text = html.escape(text)
+        
+        return True, text
+    
+    def validate_telegram_request(self, message: types.Message) -> bool:
+        if not SECURITY_SETTINGS['validate_telegram_ua']:
+            return True
+            
+        if not hasattr(message, 'from_user') or not hasattr(message, 'chat'):
+            self.log_security_event('invalid_telegram_structure', 0, 'Неверная структура')
+            return False
+        
+        if not message.from_user or not message.from_user.id:
+            self.log_security_event('missing_user_id', 0, 'Отсутствует ID')
+            return False
+        
+        return True
+    
+    def verify_owner(self, user_id: int) -> bool:
+        return user_id == ADMIN_ID
+    
+    def get_security_report(self) -> dict:
+        now = time.time()
+        hour_ago = now - 3600
+        
+        return {
+            'total_logs': len(self.security_logs),
+            'logs_last_hour': len([l for l in self.security_logs 
+                                  if datetime.fromisoformat(l['timestamp']).timestamp() > hour_ago]),
+            'blocked_users': len(self.blocked_users),
+            'blocked_ips': len(self.blocked_ips),
+            'rate_limit_violations': len([l for l in self.security_logs 
+                                         if l['event_type'] == 'rate_limit_exceeded']),
+            'brute_force_attempts': len([l for l in self.security_logs 
+                                        if 'brute_force' in l['event_type']])
+        }
+
+security = SecurityManager()
+
+# ========== ФУНКЦИИ ДЛЯ ПЕРЕВОДА ==========
+class TranslationManager:
+    """Менеджер для перевода текстов"""
+    
+    def __init__(self):
+        self.translator = Translator() if TRANSLATION_AVAILABLE else None
+        self.supported_languages = LANGUAGES if TRANSLATION_AVAILABLE else {}
+        
+    def detect_language(self, text: str) -> str:
+        """Определяет язык текста"""
+        if not TRANSLATION_AVAILABLE or not text:
+            return 'unknown'
+        try:
+            lang = langdetect.detect(text)
+            return lang
+        except:
+            return 'unknown'
+    
+    def get_language_name(self, lang_code: str) -> str:
+        """Возвращает название языка по коду"""
+        if not TRANSLATION_AVAILABLE:
+            return lang_code
+        return self.supported_languages.get(lang_code, lang_code)
+    
+    async def translate(self, text: str, dest_lang: str = 'ru', src_lang: str = 'auto') -> dict:
+        """Переводит текст с указанием источника"""
+        if not TRANSLATION_AVAILABLE or not text:
+            return {
+                'original': text,
+                'translated': text,
+                'src_lang': 'unknown',
+                'dest_lang': dest_lang,
+                'was_translated': False
+            }
+        
+        try:
+            if src_lang == 'auto':
+                src_lang = self.detect_language(text)
+            
+            if src_lang == dest_lang:
+                return {
+                    'original': text,
+                    'translated': text,
+                    'src_lang': src_lang,
+                    'dest_lang': dest_lang,
+                    'was_translated': False
+                }
+            
+            result = await self.translator.translate(text, dest=dest_lang, src=src_lang)
+            
+            return {
+                'original': text,
+                'translated': result.text,
+                'src_lang': src_lang,
+                'dest_lang': dest_lang,
+                'src_lang_name': self.get_language_name(src_lang),
+                'dest_lang_name': self.get_language_name(dest_lang),
+                'was_translated': True
+            }
+        except Exception as e:
+            print(f"Ошибка перевода: {e}")
+            return {
+                'original': text,
+                'translated': text,
+                'src_lang': 'unknown',
+                'dest_lang': dest_lang,
+                'was_translated': False
+            }
+    
+    def add_translation_note(self, text: str, src_lang: str) -> str:
+        """Добавляет пометку о переводе"""
+        if not TRANSLATION_AVAILABLE or src_lang == 'ru' or src_lang == 'unknown':
+            return text
+        lang_name = self.get_language_name(src_lang)
+        return f"[Переведено с {lang_name}]\n\n{text}"
+
+translator = TranslationManager()
+
+# ========== РАСШИРЕННЫЙ ПОИСК В ИНТЕРНЕТЕ ==========
+class WebSearchManager:
+    """Менеджер для поиска в интернете с поддержкой 7 поисковиков"""
+    
+    def __init__(self):
+        self.user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ]
+        self.session = None
+        
+    async def get_session(self):
+        if not self.session:
+            self.session = aiohttp.ClientSession()
+        return self.session
+    
+    async def close(self):
+        if self.session:
+            await self.session.close()
+    
+    def _get_headers(self):
+        return {
+            'User-Agent': random.choice(self.user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'DNT': '1',
+            'Connection': 'keep-alive'
+        }
+    
+    async def search_google(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://www.google.com/search?q={search_query}&num={num_results}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for g in soup.find_all('div', class_='g'):
+                        title_elem = g.find('h3')
+                        link_elem = g.find('a')
+                        desc_elem = g.find('div', class_=['IsZvec', 'VwiC3b'])
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('/url?q='):
+                                link = link.split('/url?q=')[1].split('&')[0]
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Google',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Google: {e}")
+            return []
+    
+    async def search_bing(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://www.bing.com/search?q={search_query}&count={num_results}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for li in soup.find_all('li', class_='b_algo'):
+                        title_elem = li.find('h2')
+                        link_elem = li.find('a')
+                        desc_elem = li.find('p')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Bing',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Bing: {e}")
+            return []
+    
+    async def search_yahoo(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://search.yahoo.com/search?p={search_query}&n={num_results}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for div in soup.find_all('div', class_='algo'):
+                        title_elem = div.find('h3')
+                        link_elem = div.find('a')
+                        desc_elem = div.find('div', class_='compText')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Yahoo',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Yahoo: {e}")
+            return []
+    
+    async def search_yandex(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://yandex.ru/search/?text={search_query}&numdoc={num_results}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for li in soup.find_all('li', class_='serp-item'):
+                        title_elem = li.find('h2')
+                        link_elem = li.find('a')
+                        desc_elem = li.find('div', class_='text-container')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Yandex',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Yandex: {e}")
+            return []
+    
+    async def search_duckduckgo(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://html.duckduckgo.com/html/?q={search_query}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for result in soup.find_all('div', class_='result'):
+                        title_elem = result.find('h2', class_='result__title')
+                        link_elem = result.find('a', class_='result__a')
+                        desc_elem = result.find('a', class_='result__snippet')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'DuckDuckGo',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка DuckDuckGo: {e}")
+            return []
+    
+    async def search_baidu(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://www.baidu.com/s?wd={search_query}&rn={num_results}"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for div in soup.find_all('div', class_='result'):
+                        title_elem = div.find('h3')
+                        link_elem = div.find('a')
+                        desc_elem = div.find('div', class_='c-abstract')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Baidu',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Baidu: {e}")
+            return []
+    
+    async def search_ask(self, query: str, num_results: int = 20) -> List[dict]:
+        try:
+            results = []
+            search_query = quote_plus(query)
+            url = f"https://www.ask.com/web?q={search_query}&qo=pagination&page=1"
+            
+            session = await self.get_session()
+            async with session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    html_content = await response.text()
+                    soup = BeautifulSoup(html_content, 'html.parser')
+                    
+                    for div in soup.find_all('div', class_='PartialSearchResults-item'):
+                        title_elem = div.find('a', class_='PartialSearchResults-item-title')
+                        link_elem = title_elem
+                        desc_elem = div.find('p', class_='PartialSearchResults-item-abstract')
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text()
+                            link = link_elem.get('href')
+                            description = desc_elem.get_text() if desc_elem else ''
+                            
+                            if link and link.startswith('http'):
+                                results.append({
+                                    'title': title,
+                                    'link': link,
+                                    'description': description,
+                                    'source': 'Ask.com',
+                                    'language': translator.detect_language(title + ' ' + description)
+                                })
+                    
+                    return results[:num_results]
+        except Exception as e:
+            print(f"Ошибка Ask.com: {e}")
+            return []
+    
+    async def search_all(self, query: str, engines: List[str] = None, num_per_engine: int = 15) -> List[dict]:
+        """Поиск во всех указанных поисковиках"""
+        if engines is None:
+            engines = ['google', 'bing', 'yahoo', 'yandex', 'duckduckgo', 'baidu', 'ask']
+        
+        all_results = []
+        seen_links = set()
+        
+        search_tasks = []
+        for engine in engines:
+            if engine == 'google':
+                search_tasks.append(self.search_google(query, num_per_engine))
+            elif engine == 'bing':
+                search_tasks.append(self.search_bing(query, num_per_engine))
+            elif engine == 'yahoo':
+                search_tasks.append(self.search_yahoo(query, num_per_engine))
+            elif engine == 'yandex':
+                search_tasks.append(self.search_yandex(query, num_per_engine))
+            elif engine == 'duckduckgo':
+                search_tasks.append(self.search_duckduckgo(query, num_per_engine))
+            elif engine == 'baidu':
+                search_tasks.append(self.search_baidu(query, num_per_engine))
+            elif engine == 'ask':
+                search_tasks.append(self.search_ask(query, num_per_engine))
+        
+        results_lists = await asyncio.gather(*search_tasks, return_exceptions=True)
+        
+        for results in results_lists:
+            if isinstance(results, list):
+                for result in results:
+                    if result['link'] not in seen_links:
+                        seen_links.add(result['link'])
+                        all_results.append(result)
+        
+        return all_results[:MAX_WEB_RESULTS]
+
+web_search = WebSearchManager()
 
 # ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ФАЙЛАМИ ==========
 def load_channels():
-    """Загружает сохраненные каналы из JSON (общие для всех)"""
     if os.path.exists(CHANNELS_FILE):
         with open(CHANNELS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
 
 def save_channels(channels):
-    """Сохраняет каналы в JSON (общие для всех)"""
     with open(CHANNELS_FILE, 'w', encoding='utf-8') as f:
         json.dump(channels, f, ensure_ascii=False, indent=2)
 
 def normalize_channel_url(url):
-    """Нормализует URL канала, убирая лишние t.me/"""
-    # Убираем @ в начале
     url = url.replace('@', '')
     
-    # Если ссылка уже содержит t.me, нормализуем её
     if 't.me/' in url:
-        # Разбиваем по t.me/ и берем последнюю часть
         parts = url.split('t.me/')
         username = parts[-1].strip('/')
-        # Убираем лишние слеши в username
         username = username.split('/')[0]
         return f"https://t.me/{username}"
     
-    # Если просто имя канала
     if '/' not in url and not url.startswith('http'):
         return f"https://t.me/{url}"
     
     return url
 
 def extract_channel_name(url):
-    """Извлекает имя канала из ссылки"""
-    # Сначала нормализуем URL
     url = normalize_channel_url(url)
     match = re.search(r't\.me/(?:s/)?([a-zA-Z0-9_]+)', url)
     if match:
@@ -136,63 +731,44 @@ def extract_channel_name(url):
     return None
 
 def export_channels_to_excel():
-    """Экспортирует каналы в Excel файл"""
     try:
         channels = load_channels()
-        
-        # Создаем DataFrame
         df = pd.DataFrame(channels)
-        
-        # Добавляем столбец с номером
         df.insert(0, '№', range(1, len(df) + 1))
-        
-        # Сохраняем в Excel
         filename = f"channels_export_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         filepath = os.path.join(UPLOADS_DIR, filename)
-        
         df.to_excel(filepath, index=False, engine='openpyxl')
-        
         return filepath
     except Exception as e:
-        print(f"Ошибка экспорта в Excel: {e}")
+        print(f"Ошибка экспорта: {e}")
         return None
 
 def import_channels_from_excel(file_path):
-    """Импортирует каналы из Excel файла"""
     try:
-        # Читаем Excel файл
         df = pd.read_excel(file_path, engine='openpyxl')
-        
-        # Получаем текущие каналы
         current_channels = load_channels()
         current_urls = [ch['url'] for ch in current_channels]
-        
         new_channels = []
         duplicates = []
         invalid = []
         
         for index, row in df.iterrows():
-            # Ищем столбцы с названием и ссылкой
             name_col = None
             url_col = None
             
             for col in df.columns:
                 col_lower = str(col).lower()
-                if 'название' in col_lower or 'name' in col_lower or 'канал' in col_lower:
+                if 'название' in col_lower or 'name' in col_lower:
                     name_col = col
-                if 'ссылка' in col_lower or 'url' in col_lower or 'link' in col_lower:
+                if 'ссылка' in col_lower or 'url' in col_lower:
                     url_col = col
             
             if name_col and url_col:
                 name = str(row[name_col]).strip()
                 url = str(row[url_col]).strip()
                 
-                # Проверяем, что ссылка валидная
                 if url and ('t.me/' in url or '@' in url):
-                    # Нормализуем ссылку
                     url = normalize_channel_url(url)
-                    
-                    # Проверяем на дубликаты
                     if url in current_urls:
                         duplicates.append(f"{name} - {url}")
                     else:
@@ -201,7 +777,6 @@ def import_channels_from_excel(file_path):
                 else:
                     invalid.append(f"{name} - {url}")
         
-        # Добавляем новые каналы
         if new_channels:
             current_channels.extend(new_channels)
             save_channels(current_channels)
@@ -214,20 +789,15 @@ def import_channels_from_excel(file_path):
             'total': len(current_channels)
         }
     except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
+        return {'success': False, 'error': str(e)}
 
 def import_channels_from_txt(file_path):
-    """Импортирует каналы из текстового файла"""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
         
         current_channels = load_channels()
         current_urls = [ch['url'] for ch in current_channels]
-        
         new_channels = []
         duplicates = []
         invalid = []
@@ -237,22 +807,16 @@ def import_channels_from_txt(file_path):
             if not line or line.startswith('#'):
                 continue
             
-            # Пытаемся разделить строку на название и ссылку
             parts = line.split(',')
             if len(parts) >= 2:
                 name = parts[0].strip()
                 url = parts[1].strip()
             else:
-                # Если только ссылка, пытаемся извлечь название
                 url = line
                 name = extract_channel_name(url) or url.split('/')[-1]
             
-            # Проверяем, что ссылка валидная
             if url and ('t.me/' in url or '@' in url):
-                # Нормализуем ссылку
                 url = normalize_channel_url(url)
-                
-                # Проверяем на дубликаты
                 if url in current_urls:
                     duplicates.append(f"{name} - {url}")
                 else:
@@ -261,7 +825,6 @@ def import_channels_from_txt(file_path):
             else:
                 invalid.append(f"{name} - {url}")
         
-        # Добавляем новые каналы
         if new_channels:
             current_channels.extend(new_channels)
             save_channels(current_channels)
@@ -274,13 +837,9 @@ def import_channels_from_txt(file_path):
             'total': len(current_channels)
         }
     except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
+        return {'success': False, 'error': str(e)}
 
 def safe_remove_file(filename):
-    """Безопасное удаление файла с повторными попытками"""
     for i in range(5):
         try:
             if os.path.exists(filename):
@@ -293,7 +852,6 @@ def safe_remove_file(filename):
     return False
 
 def save_session_string(session_string):
-    """Сохраняет мастер-сессию в текстовый файл"""
     global MASTER_SESSION
     try:
         session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
@@ -306,7 +864,6 @@ def save_session_string(session_string):
         return False
 
 def load_master_session():
-    """Загружает мастер-сессию из текстового файла"""
     global MASTER_SESSION
     try:
         session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
@@ -319,7 +876,6 @@ def load_master_session():
     return None
 
 def remove_master_session():
-    """Удаляет мастер-сессию"""
     global MASTER_SESSION
     try:
         session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
@@ -332,16 +888,14 @@ def remove_master_session():
     return False
 
 def cleanup_temp_files(user_id):
-    """Очищает временные файлы пользователя"""
     try:
         for file in os.listdir(IMAGES_DIR):
             if file.startswith(f"img_{user_id}_"):
                 os.remove(os.path.join(IMAGES_DIR, file))
     except Exception as e:
-        print(f"Ошибка очистки временных файлов: {e}")
+        print(f"Ошибка очистки: {e}")
 
 async def download_media(message, user_id, client):
-    """Скачивает медиафайл из сообщения и сохраняет локально"""
     try:
         if message.media:
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -356,13 +910,9 @@ async def download_media(message, user_id, client):
                             break
                 if not file_extension:
                     mime_to_ext = {
-                        'image/jpeg': '.jpg',
-                        'image/png': '.png',
-                        'image/gif': '.gif',
-                        'video/mp4': '.mp4',
-                        'video/quicktime': '.mov',
-                        'application/pdf': '.pdf',
-                        'application/msword': '.doc',
+                        'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+                        'video/mp4': '.mp4', 'video/quicktime': '.mov',
+                        'application/pdf': '.pdf', 'application/msword': '.doc',
                         'application/vnd.openxmlformats-officedocument.wordprocessingml.document': '.docx'
                     }
                     file_extension = mime_to_ext.get(doc.mime_type, '.bin')
@@ -377,7 +927,6 @@ async def download_media(message, user_id, client):
     return None
 
 def add_image_to_doc(doc, image_path, max_width_inches=6):
-    """Добавляет изображение в документ Word"""
     try:
         with Image.open(image_path) as img:
             width, height = img.size
@@ -387,146 +936,39 @@ def add_image_to_doc(doc, image_path, max_width_inches=6):
             doc.add_picture(image_path, width=Cm(doc_width * 2.54))
             return True
     except Exception as e:
-        print(f"Ошибка добавления изображения в документ: {e}")
+        print(f"Ошибка добавления изображения: {e}")
         return False
 
 def add_hyperlink(paragraph, text, url):
-    """Добавляет гиперссылку в параграф Word документа"""
-    # Получаем часть документа
     part = paragraph.part
-    
-    # Создаем элемент гиперссылки
     hyperlink = OxmlElement('w:hyperlink')
     hyperlink.set(qn('r:id'), part.relate_to(url, 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink', is_external=True))
     
-    # Создаем элемент прогона
     r = OxmlElement('w:r')
-    
-    # Создаем элемент свойств прогона
     rPr = OxmlElement('w:rPr')
-    
-    # Создаем элемент стиля (синий, подчеркнутый для ссылки)
     rStyle = OxmlElement('w:rStyle')
     rStyle.set(qn('w:val'), 'Hyperlink')
     rPr.append(rStyle)
-    
     r.append(rPr)
     
-    # Создаем элемент текста
     t = OxmlElement('w:t')
     t.text = text
     r.append(t)
     
     hyperlink.append(r)
     paragraph._p.append(hyperlink)
-    
     return hyperlink
 
-# ========== ФУНКЦИИ ДЛЯ ПОИСКА В ИНТЕРНЕТЕ ==========
-async def search_google(query, num_results=20):
-    """Поиск в Google"""
-    try:
-        results = []
-        search_query = quote_plus(query)
-        url = f"https://www.google.com/search?q={search_query}&num={num_results}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    html_content = await response.text()
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    
-                    # Поиск результатов
-                    for g in soup.find_all('div', class_='g'):
-                        title_elem = g.find('h3')
-                        link_elem = g.find('a')
-                        desc_elem = g.find('div', class_='IsZvec')
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text()
-                            link = link_elem.get('href')
-                            description = desc_elem.get_text() if desc_elem else ''
-                            
-                            # Очищаем ссылку
-                            if link.startswith('/url?q='):
-                                link = link.split('/url?q=')[1].split('&')[0]
-                            
-                            if link.startswith('http'):
-                                results.append({
-                                    'title': title,
-                                    'link': link,
-                                    'description': description,
-                                    'source': 'Google'
-                                })
-                    
-                    return results[:num_results]
-    except Exception as e:
-        print(f"Ошибка поиска в Google: {e}")
-        return []
-
-async def search_bing(query, num_results=20):
-    """Поиск в Bing"""
-    try:
-        results = []
-        search_query = quote_plus(query)
-        url = f"https://www.bing.com/search?q={search_query}&count={num_results}"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers) as response:
-                if response.status == 200:
-                    html_content = await response.text()
-                    soup = BeautifulSoup(html_content, 'html.parser')
-                    
-                    # Поиск результатов
-                    for li in soup.find_all('li', class_='b_algo'):
-                        title_elem = li.find('h2')
-                        link_elem = li.find('a')
-                        desc_elem = li.find('p')
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text()
-                            link = link_elem.get('href')
-                            description = desc_elem.get_text() if desc_elem else ''
-                            
-                            if link.startswith('http'):
-                                results.append({
-                                    'title': title,
-                                    'link': link,
-                                    'description': description,
-                                    'source': 'Bing'
-                                })
-                    
-                    return results[:num_results]
-    except Exception as e:
-        print(f"Ошибка поиска в Bing: {e}")
-        return []
-
-# ========== ФУНКЦИИ ДЛЯ ПРОВЕРКИ АДМИНА ==========
 def is_admin(user_id):
-    """Проверяет, является ли пользователь администратором"""
     return user_id == ADMIN_ID
 
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПЕРИОДАМИ ==========
 def parse_period(text):
-    """Парсит текстовое представление периода и возвращает количество часов"""
-    text = text.lower().strip()
+    text = text.lower().strip().rstrip('.')
     
-    # Убираем возможные точки в конце
-    text = text.rstrip('.')
-    
-    # Паттерны для русских единиц измерения
     patterns = [
-        (r'^(\d+)\s*(?:час|часа|часов|ч)$', 1),  # часы
-        (r'^(\d+)\s*(?:минут|минута|минуты|мин|м)$', 1/60),  # минуты
-        (r'^(\d+)\s*(?:день|дня|дней|д|сут|суток)$', 24),  # дни
+        (r'^(\d+)\s*(?:час|часа|часов|ч)$', 1),
+        (r'^(\d+)\s*(?:минут|минута|минуты|мин|м)$', 1/60),
+        (r'^(\d+)\s*(?:день|дня|дней|д|сут|суток)$', 24),
     ]
     
     for pattern, multiplier in patterns:
@@ -535,7 +977,6 @@ def parse_period(text):
             value = int(match.group(1))
             return value * multiplier
     
-    # Если просто число - считаем что это часы
     match = re.match(r'^(\d+)$', text)
     if match:
         return int(match.group(1))
@@ -543,7 +984,6 @@ def parse_period(text):
     return None
 
 def format_period(period_hours):
-    """Форматирует количество часов в читаемый текст"""
     if period_hours < 1:
         minutes = int(period_hours * 60)
         if minutes == 1:
@@ -569,17 +1009,13 @@ def format_period(period_hours):
             return f"{int(days)} дней"
 
 def format_datetime_utc10(dt):
-    """Форматирует дату с часовым поясом UTC+10"""
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    # Переводим в UTC+10
     dt_utc10 = dt.astimezone(UTC_PLUS_10)
     return dt_utc10.strftime('%d.%m.%Y %H:%M')
 
 # ========== КЛАВИАТУРЫ ==========
 def get_main_keyboard(user_id):
-    """Главная клавиатура с кнопками"""
-    
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("📋 Список каналов"),
@@ -588,10 +1024,10 @@ def get_main_keyboard(user_id):
         KeyboardButton("📥 Экспорт каналов"),
         KeyboardButton("🔍 Расширенный поиск"),
         KeyboardButton("❓ Помощь"),
-        KeyboardButton("⏹️ Стоп")
+        KeyboardButton("⏹️ Стоп"),
+        KeyboardButton("🛡️ Безопасность")
     )
     
-    # Кнопки только для админа
     if is_admin(user_id):
         keyboard.add(
             KeyboardButton("🔄 Собрать всё"),
@@ -601,7 +1037,6 @@ def get_main_keyboard(user_id):
     return keyboard
 
 def get_search_type_keyboard():
-    """Клавиатура для выбора типа поиска"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("📱 По каналам (из базы)"),
@@ -613,18 +1048,21 @@ def get_search_type_keyboard():
     return keyboard
 
 def get_web_search_keyboard():
-    """Клавиатура для выбора поисковой системы"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
+        KeyboardButton("🔍 Все поисковики (7)"),
         KeyboardButton("🔍 Google"),
         KeyboardButton("🔎 Bing"),
-        KeyboardButton("🌐 Все поисковики"),
+        KeyboardButton("🔍 Yahoo"),
+        KeyboardButton("🌍 Yandex"),
+        KeyboardButton("🦆 DuckDuckGo"),
+        KeyboardButton("🐼 Baidu"),
+        KeyboardButton("❓ Ask.com"),
         KeyboardButton("◀️ Назад")
     )
     return keyboard
 
 def get_period_keyboard():
-    """Клавиатура для выбора периода"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("🕐 1 час"),
@@ -639,15 +1077,11 @@ def get_period_keyboard():
     return keyboard
 
 def get_custom_period_keyboard():
-    """Клавиатура для ввода своего периода"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    keyboard.add(
-        KeyboardButton("◀️ Назад")
-    )
+    keyboard.add(KeyboardButton("◀️ Назад"))
     return keyboard
 
 def get_image_option_keyboard():
-    """Клавиатура для выбора - сохранять изображения или нет"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("🖼️ С картинками"),
@@ -657,7 +1091,6 @@ def get_image_option_keyboard():
     return keyboard
 
 def get_auth_keyboard():
-    """Клавиатура для процесса авторизации (только для админа)"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
     keyboard.add(
         KeyboardButton("❌ Отменить авторизацию"),
@@ -666,7 +1099,6 @@ def get_auth_keyboard():
     return keyboard
 
 def get_channels_management_keyboard():
-    """Клавиатура для управления каналами"""
     keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     keyboard.add(
         KeyboardButton("📤 Экспорт в Excel"),
@@ -676,118 +1108,151 @@ def get_channels_management_keyboard():
     )
     return keyboard
 
+def get_translation_keyboard():
+    keyboard = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    keyboard.add(
+        KeyboardButton("🇷🇺 На русский"),
+        KeyboardButton("🇬🇧 На английский"),
+        KeyboardButton("🇩🇪 На немецкий"),
+        KeyboardButton("🇫🇷 На французский"),
+        KeyboardButton("🇪🇸 На испанский"),
+        KeyboardButton("🇨🇳 На китайский"),
+        KeyboardButton("🔄 Без перевода"),
+        KeyboardButton("◀️ Назад")
+    )
+    return keyboard
+
 # ========== КОМАНДЫ ==========
 @dp.message_handler(commands=['start'])
 async def cmd_start(message: types.Message):
-    """Обработка команды /start"""
+    if not security.validate_telegram_request(message):
+        return
+    
     user_id = message.from_user.id
     
-    # Загружаем общий список каналов
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов. Подождите минуту.")
+        return
+    
     channels = load_channels()
     
     welcome_text = (
         "👋 Добро пожаловать!\n\n"
         "Я бот для сбора информации из Telegram-каналов и интернета.\n\n"
-        "📊 Общий список каналов доступен всем пользователям\n"
-        "✏️ Все пользователи могут добавлять каналы\n\n"
-        "🔍 Расширенный поиск:\n"
-        "• 📱 По каналам из базы - поиск только по вашим каналам\n"
-        "• 🌍 По всему Telegram - глобальный поиск по всем каналам\n"
-        "• 🔎 Поиск в интернете - поиск в Google и Bing\n"
-        "• ⚡ Комбинированный - сразу по всем источникам\n\n"
+        "🔍 *Новые возможности:*\n"
+        "• Поиск в 7 поисковых системах (Google, Bing, Yahoo, Yandex, DuckDuckGo, Baidu, Ask)\n"
+        "• Автоматический перевод на разные языки с пометкой\n"
+        "• Мощная система безопасности\n\n"
         "Как пользоваться:\n"
-        "1️⃣ Нажми '➕ Добавить канал' и отправь ссылку на канал\n"
-        "2️⃣ Канал добавится в общий список для всех\n"
-        "3️⃣ Нажми '🔍 Расширенный поиск' и выбери тип поиска\n"
-        "4️⃣ Введи ключевые слова\n"
-        "5️⃣ Выбери период времени (можно ввести свой)\n"
+        "1️⃣ Нажми '➕ Добавить канал' для добавления канала\n"
+        "2️⃣ Нажми '🔍 Расширенный поиск' и выбери тип поиска\n"
+        "3️⃣ Введи ключевые слова\n"
+        "4️⃣ Выбери язык перевода (если нужно)\n"
+        "5️⃣ Выбери период времени\n"
         "6️⃣ Выбери формат отчета\n\n"
-        "⏹️ Остановить формирование отчета - нажми '⏹️ Стоп'\n"
+        "⏹️ Остановить - '⏹️ Стоп'\n"
+        "🛡️ Безопасность - отчет о защите"
     )
     
-    # Добавляем информацию о количестве каналов
-    welcome_text += f"\n📌 Всего каналов в базе: {len(channels)}"
+    welcome_text += f"\n\n📌 Всего каналов в базе: {len(channels)}"
     
-    # Добавляем информацию для админа
     if is_admin(user_id):
         welcome_text += (
-            "\n\n👑 Вы администратор. Доступны дополнительные функции:\n"
-            "• 🔄 Собрать всё - получить все посты без фильтра\n"
-            "• 🚪 Разлогиниться - выйти из аккаунта\n"
+            "\n\n👑 Вы администратор. Доступны доп. функции:\n"
+            "• 🔄 Собрать всё\n"
+            "• 🚪 Разлогиниться\n"
+            "• 🛡️ Безопасность - подробный отчет"
         )
     
-    # Проверяем наличие мастер-сессии
     global MASTER_SESSION
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
     
     if not MASTER_SESSION and is_admin(user_id):
-        welcome_text += (
-            "\n⚠️ Мастер-сессия не найдена!\n"
-            "Нажми '🔍 Расширенный поиск' для авторизации."
-        )
+        welcome_text += "\n\n⚠️ Мастер-сессия не найдена! Нажми '🔍 Расширенный поиск' для авторизации."
     
     await message.reply(welcome_text, reply_markup=get_main_keyboard(user_id))
 
+@dp.message_handler(lambda message: message.text == "🛡️ Безопасность")
+async def show_security(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    if not is_admin(user_id):
+        await message.reply("❌ Только для администратора.")
+        return
+    
+    report = security.get_security_report()
+    
+    text = (
+        "🛡️ *Отчет по безопасности*\n\n"
+        f"📊 Всего логов: {report['total_logs']}\n"
+        f"📈 Логов за час: {report['logs_last_hour']}\n"
+        f"🚫 Заблокировано пользователей: {report['blocked_users']}\n"
+        f"🌐 Заблокировано IP: {report['blocked_ips']}\n"
+        f"⚠️ Нарушений rate limit: {report['rate_limit_violations']}\n"
+        f"🔒 Брутфорс-атак: {report['brute_force_attempts']}\n\n"
+        f"⚙️ Настройки:\n"
+        f"• Rate limiting: {'✅' if SECURITY_SETTINGS['rate_limiting'] else '❌'}\n"
+        f"• Защита от брутфорса: {'✅' if SECURITY_SETTINGS['brute_force_protection'] else '❌'}\n"
+        f"• Защита от SQL: {'✅' if SECURITY_SETTINGS['sql_injection_protection'] else '❌'}\n"
+        f"• Защита от XSS: {'✅' if SECURITY_SETTINGS['xss_protection'] else '❌'}\n"
+    )
+    
+    await message.reply(text, parse_mode='Markdown')
+
 @dp.message_handler(commands=['reset'])
 async def cmd_reset(message: types.Message):
-    """Сброс сессии и авторизации (только для админа)"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
-        await message.reply("❌ Эта команда доступна только администратору.")
+        await message.reply("❌ Только для администратора.")
         return
     
-    # Останавливаем текущий процесс если есть
     if user_id in stop_flags:
         stop_flags[user_id] = True
     
-    # Закрываем все клиенты для админа
     if user_id in auth_data and 'client' in auth_data[user_id]:
         try:
             await auth_data[user_id]['client'].disconnect()
         except:
             pass
     
-    # Удаляем мастер-сессию
     remove_master_session()
-    
-    # Очищаем временные файлы
     cleanup_temp_files(user_id)
     
-    # Очищаем данные авторизации
     if user_id in auth_data:
         del auth_data[user_id]
     
     await message.reply(
-        "🗑 Мастер-сессия полностью сброшена!\n\n"
-        "При следующем использовании нужно будет авторизоваться заново.",
+        "🗑 Мастер-сессия сброшена!",
         reply_markup=get_main_keyboard(user_id)
     )
 
 @dp.message_handler(commands=['debug'])
 async def cmd_debug(message: types.Message):
-    """Отладка - показать состояние"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     if is_admin(user_id):
         session_file = os.path.join(SESSIONS_DIR, f'master_session.txt')
         session_exists = os.path.exists(session_file)
-        
         in_auth = user_id in auth_data
-        auth_state = auth_data[user_id].get('state') if in_auth else None
         is_stopping = user_id in stop_flags and stop_flags[user_id]
-        
-        session_size = os.path.getsize(session_file) if session_exists else 0
         channels = load_channels()
         
         debug_text = (
             f"🔍 Отладка (админ)\n\n"
-            f"📁 Мастер-сессия: {'✅ есть' if session_exists else '❌ нет'} ({session_size} байт)\n"
-            f"📊 Всего каналов: {len(channels)}\n"
-            f"🔄 В процессе авторизации: {'✅ да' if in_auth else '❌ нет'}\n"
-            f"📌 Состояние: {auth_state if auth_state else '-'}\n"
-            f"⏹️ Процесс остановлен: {'✅ да' if is_stopping else '❌ нет'}\n"
+            f"📁 Мастер-сессия: {'✅' if session_exists else '❌'}\n"
+            f"📊 Каналов: {len(channels)}\n"
+            f"🔄 В авторизации: {'✅' if in_auth else '❌'}\n"
+            f"⏹️ Процесс остановлен: {'✅' if is_stopping else '❌'}\n"
             f"🆔 User ID: {user_id}"
         )
     else:
@@ -795,8 +1260,8 @@ async def cmd_debug(message: types.Message):
         channels = load_channels()
         debug_text = (
             f"🔍 Отладка\n\n"
-            f"📊 Всего каналов: {len(channels)}\n"
-            f"⏹️ Процесс остановлен: {'✅ да' if is_stopping else '❌ нет'}\n"
+            f"📊 Каналов: {len(channels)}\n"
+            f"⏹️ Процесс остановлен: {'✅' if is_stopping else '❌'}\n"
             f"🆔 User ID: {user_id}"
         )
     
@@ -804,15 +1269,18 @@ async def cmd_debug(message: types.Message):
 
 @dp.message_handler(commands=['checksession'])
 async def cmd_checksession(message: types.Message):
-    """Проверка сессии"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     global MASTER_SESSION
     if not MASTER_SESSION:
         MASTER_SESSION = load_master_session()
     
     if not MASTER_SESSION:
-        await message.reply("❌ Мастер-сессия не найдена. Обратитесь к администратору.")
+        await message.reply("❌ Мастер-сессия не найдена.")
         return
     
     if is_admin(user_id):
@@ -827,114 +1295,97 @@ async def cmd_checksession(message: types.Message):
                 await message.reply(
                     f"✅ Мастер-сессия работает!\n\n"
                     f"Имя: {me.first_name}\n"
-                    f"Username: @{me.username}\n"
-                    f"ID: {me.id}"
+                    f"Username: @{me.username}"
                 )
-                
                 new_session_string = client.session.save()
                 save_session_string(new_session_string)
             else:
-                await message.reply("❌ Мастер-сессия есть, но не активна. Нужно авторизоваться заново.")
+                await message.reply("❌ Мастер-сессия не активна.")
                 remove_master_session()
             
             await client.disconnect()
         except Exception as e:
-            await message.reply(f"❌ Ошибка при проверке: {str(e)}")
+            await message.reply(f"❌ Ошибка: {str(e)}")
             remove_master_session()
     else:
-        await message.reply("✅ Мастер-сессия активна. Бот готов к работе.")
+        await message.reply("✅ Мастер-сессия активна.")
 
 @dp.message_handler(lambda message: message.text == "📋 Список каналов")
 async def show_channels(message: types.Message):
-    """Показывает общий список сохраненных каналов"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     channels = load_channels()
     
     if not channels:
         await message.reply(
-            "📭 Пока нет добавленных каналов\n\n"
-            "Нажми '➕ Добавить канал' и отправь ссылку на Telegram-канал",
+            "📭 Пока нет добавленных каналов",
             reply_markup=get_main_keyboard(user_id)
         )
         return
     
-    # Создаем клавиатуру с кнопками для каждого канала
     keyboard = InlineKeyboardMarkup(row_width=1)
     for i, channel in enumerate(channels):
-        # Кнопка для перехода на канал
-        channel_button = InlineKeyboardButton(
-            f"📢 {channel['name']}", 
-            url=channel['url']
-        )
-        # Кнопка для удаления канала (только для админа)
+        channel_button = InlineKeyboardButton(f"📢 {channel['name']}", url=channel['url'])
         if is_admin(user_id):
-            delete_button = InlineKeyboardButton(
-                f"❌ Удалить", 
-                callback_data=f"delete_{i}"
-            )
+            delete_button = InlineKeyboardButton(f"❌ Удалить", callback_data=f"delete_{i}")
             keyboard.row(channel_button, delete_button)
         else:
             keyboard.add(channel_button)
     
-    # Кнопка удаления всех каналов (только для админа)
     if is_admin(user_id):
         keyboard.add(InlineKeyboardButton("❌ Удалить все", callback_data="delete_all"))
     
-    keyboard.add(InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main"))
+    keyboard.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
     
     text = f"📋 Общий список каналов:\n\n"
     for i, channel in enumerate(channels, 1):
         text += f"{i}. {channel['name']}\n"
-    
-    text += f"\nВсего каналов: {len(channels)}\n\n"
-    text += "Нажми на название канала чтобы перейти\n"
-    
-    if is_admin(user_id):
-        text += "Нажми ❌ Удалить чтобы удалить канал"
-    else:
-        text += "Только администратор может удалять каналы"
+    text += f"\nВсего каналов: {len(channels)}"
     
     await message.reply(text, reply_markup=keyboard)
 
 @dp.message_handler(lambda message: message.text == "➕ Добавить канал")
 async def add_channel_prompt(message: types.Message):
-    """Запрашивает ссылку на канал"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     await message.reply(
         "🔗 Отправь ссылку на Telegram-канал\n\n"
         "Примеры:\n"
         "• https://t.me/durov\n"
         "• @durov\n"
-        "• durov\n\n"
-        "✅ Канал добавится в общий список для всех пользователей!\n\n"
-        "Я сам определю название канала!"
+        "• durov"
     )
     
     user_data[user_id] = {'state': 'waiting_channel_link'}
 
 @dp.message_handler(lambda message: message.text == "📤 Импорт каналов")
 async def import_channels_prompt(message: types.Message):
-    """Предлагает выбрать способ импорта"""
     user_id = message.from_user.id
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     await message.reply(
-        "📤 Выберите способ импорта каналов:\n\n"
-        "• 📥 Импорт из Excel - загрузите Excel файл с каналами\n"
-        "• 📥 Импорт из TXT - загрузите текстовый файл с каналами\n\n"
-        "Формат файла:\n"
-        "Название, ссылка\n"
-        "Пример:\n"
-        "Новости, https://t.me/durov\n"
-        "Технологии, @techchannel",
+        "📤 Выберите способ импорта:",
         reply_markup=get_channels_management_keyboard()
     )
 
 @dp.message_handler(lambda message: message.text == "📥 Экспорт каналов")
 async def export_channels(message: types.Message):
-    """Экспортирует каналы в Excel"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     status_msg = await message.reply("🔄 Создаю Excel файл...")
     
@@ -943,65 +1394,55 @@ async def export_channels(message: types.Message):
         
         if filepath and os.path.exists(filepath):
             with open(filepath, 'rb') as f:
-                await bot.send_document(
-                    user_id,
-                    f,
-                    caption="📊 Список каналов в формате Excel"
-                )
-            
-            # Удаляем временный файл
+                await bot.send_document(user_id, f, caption="📊 Список каналов")
             os.remove(filepath)
             await status_msg.delete()
         else:
-            await status_msg.edit_text("❌ Ошибка при создании Excel файла")
+            await status_msg.edit_text("❌ Ошибка")
     except Exception as e:
         await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
 
 @dp.message_handler(lambda message: message.text == "📥 Импорт из Excel")
 async def import_excel_prompt(message: types.Message):
-    """Запрашивает Excel файл для импорта"""
     user_id = message.from_user.id
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     await message.reply(
-        "📥 Отправьте Excel файл (.xlsx) с каналами\n\n"
-        "Формат файла:\n"
-        "• Первый столбец - название канала\n"
-        "• Второй столбец - ссылка на канал\n\n"
-        "Или нажмите '◀️ Назад в меню' для возврата",
+        "📥 Отправьте Excel файл (.xlsx)",
         reply_markup=get_channels_management_keyboard()
     )
-    
     user_data[user_id] = {'state': 'waiting_excel_file'}
 
 @dp.message_handler(lambda message: message.text == "📥 Импорт из TXT")
 async def import_txt_prompt(message: types.Message):
-    """Запрашивает текстовый файл для импорта"""
     user_id = message.from_user.id
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     await message.reply(
-        "📥 Отправьте текстовый файл (.txt) с каналами\n\n"
-        "Формат файла:\n"
-        "Название, ссылка\n"
-        "Каждая строка - один канал\n\n"
-        "Пример:\n"
-        "Новости, https://t.me/durov\n"
-        "Технологии, @techchannel\n\n"
-        "Или нажмите '◀️ Назад в меню' для возврата",
+        "📥 Отправьте текстовый файл (.txt)",
         reply_markup=get_channels_management_keyboard()
     )
-    
     user_data[user_id] = {'state': 'waiting_txt_file'}
 
 @dp.message_handler(content_types=ContentType.DOCUMENT)
 async def handle_document(message: types.Message):
-    """Обрабатывает загруженные документы"""
     user_id = message.from_user.id
     
+    if not security.validate_telegram_request(message):
+        return
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     if user_id not in user_data:
-        await message.reply(
-            "Сначала выберите действие в меню",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("Сначала выберите действие", reply_markup=get_main_keyboard(user_id))
         return
     
     state = user_data[user_id].get('state')
@@ -1013,74 +1454,58 @@ async def handle_document(message: types.Message):
     file_name = document.file_name
     file_ext = os.path.splitext(file_name)[1].lower()
     
-    # Проверяем расширение файла
     if state == 'waiting_excel_file' and file_ext not in ['.xlsx', '.xls']:
-        await message.reply(
-            "❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)",
-            reply_markup=get_channels_management_keyboard()
-        )
+        await message.reply("❌ Отправьте Excel файл", reply_markup=get_channels_management_keyboard())
         return
     
     if state == 'waiting_txt_file' and file_ext != '.txt':
-        await message.reply(
-            "❌ Пожалуйста, отправьте текстовый файл (.txt)",
-            reply_markup=get_channels_management_keyboard()
-        )
+        await message.reply("❌ Отправьте текстовый файл", reply_markup=get_channels_management_keyboard())
         return
     
-    status_msg = await message.reply("🔄 Загружаю и обрабатываю файл...")
+    status_msg = await message.reply("🔄 Обрабатываю...")
     
     try:
-        # Скачиваем файл
         file_path = os.path.join(UPLOADS_DIR, f"{user_id}_{file_name}")
         await document.download(destination_file=file_path)
         
-        # Обрабатываем файл
         if state == 'waiting_excel_file':
             result = import_channels_from_excel(file_path)
         else:
             result = import_channels_from_txt(file_path)
         
-        # Удаляем временный файл
         safe_remove_file(file_path)
         
-        # Формируем ответ
         if result['success']:
             response = f"✅ Импорт завершен!\n\n"
-            response += f"📊 Добавлено новых каналов: {result['added']}\n"
-            response += f"📈 Всего каналов в базе: {result['total']}\n"
+            response += f"📊 Добавлено: {result['added']}\n"
+            response += f"📈 Всего: {result['total']}\n"
             
             if result['duplicates']:
-                response += f"\n⚠️ Найдены дубликаты ({len(result['duplicates'])}):\n"
-                for dup in result['duplicates'][:5]:  # Показываем первые 5
-                    response += f"• {dup}\n"
-                if len(result['duplicates']) > 5:
-                    response += f"... и еще {len(result['duplicates']) - 5}\n"
-            
+                response += f"\n⚠️ Дубликаты: {len(result['duplicates'])}"
             if result['invalid']:
-                response += f"\n❌ Некорректные ссылки ({len(result['invalid'])}):\n"
-                for inv in result['invalid'][:5]:  # Показываем первые 5
-                    response += f"• {inv}\n"
-                if len(result['invalid']) > 5:
-                    response += f"... и еще {len(result['invalid']) - 5}\n"
+                response += f"\n❌ Некорректные: {len(result['invalid'])}"
         else:
-            response = f"❌ Ошибка импорта: {result['error']}"
+            response = f"❌ Ошибка: {result['error']}"
         
         await status_msg.delete()
         await message.reply(response, reply_markup=get_main_keyboard(user_id))
-        
-        # Очищаем состояние
         del user_data[user_id]
         
     except Exception as e:
         await status_msg.delete()
-        await message.reply(f"❌ Ошибка при обработке файла: {str(e)}")
+        await message.reply(f"❌ Ошибка: {str(e)}")
         safe_remove_file(file_path)
 
 @dp.message_handler(lambda message: message.text == "🔍 Расширенный поиск")
 async def extended_search(message: types.Message):
-    """Расширенный поиск с выбором источника"""
     user_id = message.from_user.id
+    
+    if not security.validate_telegram_request(message):
+        return
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     global MASTER_SESSION
     if not MASTER_SESSION:
@@ -1089,42 +1514,36 @@ async def extended_search(message: types.Message):
     if not MASTER_SESSION:
         if is_admin(user_id):
             await message.reply(
-                "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
+                "🔄 Мастер-сессия не найдена. Начинаю авторизацию...",
                 reply_markup=get_auth_keyboard()
             )
             await start_authorization(user_id, message)
         else:
             await message.reply(
-                "❌ Мастер-сессия не найдена. Обратитесь к администратору.\n"
-                "Доступен только поиск в интернете.",
+                "❌ Мастер-сессия не найдена. Доступен только поиск в интернете.",
                 reply_markup=get_search_type_keyboard()
             )
             user_data[user_id] = {'state': 'waiting_search_type'}
         return
     
     await message.reply(
-        "🔍 Выберите источник поиска:\n\n"
-        "• 📱 По каналам (из базы) - поиск только по вашим каналам\n"
-        "• 🌍 По всему Telegram - глобальный поиск по всем каналам\n"
-        "• 🔎 Поиск в интернете - поиск в Google и Bing\n"
-        "• ⚡ Комбинированный поиск - сразу по всем источникам",
+        "🔍 Выберите источник поиска:",
         reply_markup=get_search_type_keyboard()
     )
-    
     user_data[user_id] = {'state': 'waiting_search_type'}
 
 @dp.message_handler(lambda message: message.text == "📱 По каналам (из базы)")
 async def search_channels_only(message: types.Message):
-    """Поиск только по каналам из базы"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     channels = load_channels()
     
     if not channels:
-        await message.reply(
-            "❌ Сначала добавьте каналы через '➕ Добавить канал'",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("❌ Сначала добавьте каналы", reply_markup=get_main_keyboard(user_id))
         return
     
     user_data[user_id] = {
@@ -1133,30 +1552,26 @@ async def search_channels_only(message: types.Message):
         'channels': channels
     }
     
-    await message.reply(
-        "🔍 Введите ключевые слова для поиска по каналам:",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("🔍 Введите ключевые слова:", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "🌍 По всему Telegram")
 async def search_global_telegram(message: types.Message):
-    """Глобальный поиск по всему Telegram"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     global MASTER_SESSION
     if not MASTER_SESSION:
         if is_admin(user_id):
             await message.reply(
-                "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
+                "🔄 Мастер-сессия не найдена. Начинаю авторизацию...",
                 reply_markup=get_auth_keyboard()
             )
             await start_authorization(user_id, message)
         else:
-            await message.reply(
-                "❌ Для глобального поиска в Telegram нужна мастер-сессия.\n"
-                "Обратитесь к администратору.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await message.reply("❌ Нужна мастер-сессия.", reply_markup=get_main_keyboard(user_id))
         return
     
     user_data[user_id] = {
@@ -1164,50 +1579,48 @@ async def search_global_telegram(message: types.Message):
         'search_type': 'global_telegram'
     }
     
-    await message.reply(
-        "🔍 Введите ключевые слова для глобального поиска по Telegram:",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("🔍 Введите ключевые слова для глобального поиска:", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "🔎 Поиск в интернете")
 async def search_web(message: types.Message):
-    """Поиск в интернете"""
     user_id = message.from_user.id
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     await message.reply(
-        "🌐 Выберите поисковую систему:\n\n"
-        "• 🔍 Google\n"
-        "• 🔎 Bing\n"
-        "• 🌐 Все поисковики (комбинированный результат)",
+        "🌐 Выберите поисковую систему (доступно 7):",
         reply_markup=get_web_search_keyboard()
     )
-    
     user_data[user_id] = {'state': 'waiting_web_search_type'}
 
 @dp.message_handler(lambda message: message.text == "⚡ Комбинированный поиск")
 async def search_combined(message: types.Message):
-    """Комбинированный поиск по всем источникам"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     global MASTER_SESSION
     if not MASTER_SESSION:
         if is_admin(user_id):
             await message.reply(
-                "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
+                "🔄 Мастер-сессия не найдена. Начинаю авторизацию...",
                 reply_markup=get_auth_keyboard()
             )
             await start_authorization(user_id, message)
         else:
             await message.reply(
-                "❌ Для комбинированного поиска нужна мастер-сессия.\n"
-                "Будет выполнен только поиск в интернете.",
+                "❌ Будет выполнен только поиск в интернете.",
                 reply_markup=get_main_keyboard(user_id)
             )
             user_data[user_id] = {
                 'state': 'waiting_keywords',
                 'search_type': 'web_only'
             }
-            await message.reply("🔍 Введите ключевые слова для поиска в интернете:")
+            await message.reply("🔍 Введите ключевые слова:")
         return
     
     channels = load_channels()
@@ -1218,69 +1631,131 @@ async def search_combined(message: types.Message):
         'channels': channels
     }
     
-    await message.reply(
-        "🔍 Введите ключевые слова для комбинированного поиска\n"
-        "(по каналам, глобальный Telegram и интернет):",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("🔍 Введите ключевые слова для комбинированного поиска:", reply_markup=get_main_keyboard(user_id))
 
-@dp.message_handler(lambda message: message.text == "🔍 Google")
-async def search_google_only(message: types.Message):
-    """Поиск только в Google"""
-    user_id = message.from_user.id
-    
-    user_data[user_id] = {
-        'state': 'waiting_keywords',
-        'search_type': 'google'
-    }
-    
-    await message.reply(
-        "🔍 Введите ключевые слова для поиска в Google:",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-@dp.message_handler(lambda message: message.text == "🔎 Bing")
-async def search_bing_only(message: types.Message):
-    """Поиск только в Bing"""
-    user_id = message.from_user.id
-    
-    user_data[user_id] = {
-        'state': 'waiting_keywords',
-        'search_type': 'bing'
-    }
-    
-    await message.reply(
-        "🔎 Введите ключевые слова для поиска в Bing:",
-        reply_markup=get_main_keyboard(user_id)
-    )
-
-@dp.message_handler(lambda message: message.text == "🌐 Все поисковики")
+@dp.message_handler(lambda message: message.text == "🔍 Все поисковики (7)")
 async def search_all_engines(message: types.Message):
-    """Поиск во всех поисковиках"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     user_data[user_id] = {
         'state': 'waiting_keywords',
         'search_type': 'all_engines'
     }
     
-    await message.reply(
-        "🌐 Введите ключевые слова для поиска во всех поисковиках:",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("🌐 Введите ключевые слова для поиска во всех 7 поисковиках:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🔍 Google")
+async def search_google_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'google'
+    }
+    await message.reply("🔍 Введите ключевые слова для Google:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🔎 Bing")
+async def search_bing_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'bing'
+    }
+    await message.reply("🔎 Введите ключевые слова для Bing:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🔍 Yahoo")
+async def search_yahoo_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'yahoo'
+    }
+    await message.reply("🔍 Введите ключевые слова для Yahoo:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🌍 Yandex")
+async def search_yandex_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'yandex'
+    }
+    await message.reply("🌍 Введите ключевые слова для Yandex:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🦆 DuckDuckGo")
+async def search_duckduckgo_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'duckduckgo'
+    }
+    await message.reply("🦆 Введите ключевые слова для DuckDuckGo:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "🐼 Baidu")
+async def search_baidu_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'baidu'
+    }
+    await message.reply("🐼 Введите ключевые слова для Baidu:", reply_markup=get_main_keyboard(user_id))
+
+@dp.message_handler(lambda message: message.text == "❓ Ask.com")
+async def search_ask_only(message: types.Message):
+    user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    user_data[user_id] = {
+        'state': 'waiting_keywords',
+        'search_type': 'ask'
+    }
+    await message.reply("❓ Введите ключевые слова для Ask.com:", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "🔄 Собрать всё")
 async def collect_all(message: types.Message):
-    """Собрать все посты без фильтра (только для админа)"""
     user_id = message.from_user.id
     
-    # Проверяем, админ ли пользователь
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     if not is_admin(user_id):
-        await message.reply(
-            "❌ Эта функция доступна только администратору.\n"
-            "Используйте '🔍 Расширенный поиск' для поиска.",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("❌ Только для администратора.", reply_markup=get_main_keyboard(user_id))
         return
     
     global MASTER_SESSION
@@ -1289,7 +1764,7 @@ async def collect_all(message: types.Message):
     
     if not MASTER_SESSION:
         await message.reply(
-            "🔄 Мастер-сессия не найдена. Начинаю процесс авторизации...",
+            "🔄 Мастер-сессия не найдена. Начинаю авторизацию...",
             reply_markup=get_auth_keyboard()
         )
         await start_authorization(user_id, message)
@@ -1298,16 +1773,11 @@ async def collect_all(message: types.Message):
     channels = load_channels()
     
     if not channels:
-        await message.reply(
-            "❌ Сначала добавь каналы через '➕ Добавить канал'",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("❌ Сначала добавьте каналы", reply_markup=get_main_keyboard(user_id))
         return
     
     await message.reply(
-        "⏱ Выбери период времени\n\n"
-        f"Максимальный период: {MAX_PERIOD_DAYS} дней\n"
-        "За какой период собирать все посты?",
+        "⏱ Выбери период времени",
         reply_markup=get_period_keyboard()
     )
     
@@ -1320,69 +1790,65 @@ async def collect_all(message: types.Message):
 
 @dp.message_handler(lambda message: message.text == "❓ Помощь")
 async def show_help(message: types.Message):
-    """Показывает справку"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     channels = load_channels()
     
     help_text = (
         "❓ Помощь\n\n"
-        "📋 Список каналов - посмотреть общий список каналов\n"
-        "➕ Добавить канал - добавить новый канал в общий список\n"
-        "📤 Импорт каналов - загрузить каналы из файла\n"
-        "📥 Экспорт каналов - сохранить каналы в Excel\n"
-        "🔍 Расширенный поиск - поиск с выбором источника\n"
-        "⏹️ Стоп - остановить формирование отчета\n\n"
-        f"📊 Всего каналов в базе: {len(channels)}\n\n"
+        "📋 Список каналов - посмотреть каналы\n"
+        "➕ Добавить канал - добавить канал\n"
+        "📤 Импорт/📥 Экспорт - управление каналами\n"
+        "🔍 Расширенный поиск - выбор источника\n"
+        "⏹️ Стоп - остановить поиск\n"
+        "🛡️ Безопасность - отчет о защите\n\n"
+        f"📊 Каналов в базе: {len(channels)}\n\n"
         "🔍 Типы поиска:\n"
-        "• 📱 По каналам - поиск только по добавленным каналам\n"
-        "• 🌍 По всему Telegram - глобальный поиск по всем каналам\n"
-        "• 🔎 Поиск в интернете - поиск в Google и Bing\n"
-        "• ⚡ Комбинированный - сразу по всем источникам\n\n"
-        "После выбора периода появится выбор:\n"
-        "🖼️ С картинками - сохранить изображения в отчет\n"
-        "📝 Только текст - только текст, без картинок\n\n"
-        "⌨️ Свой период - можно ввести любой период, например:\n"
-        "• 30 минут\n"
-        "• 2 часа\n"
-        "• 5 дней\n"
-        f"• Максимум: {MAX_PERIOD_DAYS} дней\n\n"
-        "Команды:\n"
-        "/debug - диагностика\n"
-        "/checksession - проверка сессии"
+        "• 📱 По каналам из базы\n"
+        "• 🌍 По всему Telegram\n"
+        "• 🔎 Поиск в интернете (7 поисковиков)\n"
+        "• ⚡ Комбинированный\n\n"
+        "🌐 Поисковики: Google, Bing, Yahoo, Yandex, DuckDuckGo, Baidu, Ask\n"
+        "🌍 Перевод: автоматический с пометкой\n\n"
+        "⌨️ Свой период: 30 минут, 2 часа, 5 дней и т.д.\n"
+        f"Максимум: {MAX_PERIOD_DAYS} дней"
     )
     
     if is_admin(user_id):
         help_text += (
-            "\n\n👑 Команды администратора:\n"
-            "🔄 Собрать всё - получить все посты без фильтра\n"
-            "🚪 Разлогиниться - выйти из аккаунта\n"
-            "/reset - сброс авторизации"
+            "\n\n👑 Админ:\n"
+            "🔄 Собрать всё\n"
+            "🚪 Разлогиниться\n"
+            "/reset - сброс"
         )
     
     await message.reply(help_text, reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "⏹️ Стоп")
 async def stop_process(message: types.Message):
-    """Останавливает текущий процесс сбора"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     if user_id in stop_flags:
         stop_flags[user_id] = True
-        await message.reply(
-            "⏹️ Отправлен сигнал остановки...",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("⏹️ Останавливаю...", reply_markup=get_main_keyboard(user_id))
     else:
-        await message.reply(
-            "Нет активного процесса для остановки.",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("Нет активного процесса.", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "❌ Отменить авторизацию")
 async def cancel_auth(message: types.Message):
-    """Отмена процесса авторизации (только для админа)"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     if not is_admin(user_id):
         return
@@ -1395,104 +1861,83 @@ async def cancel_auth(message: types.Message):
                 pass
         del auth_data[user_id]
     
-    await message.reply(
-        "❌ Авторизация отменена.",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("❌ Авторизация отменена.", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "🚪 Разлогиниться")
 async def logout(message: types.Message):
-    """Выход из аккаунта (только для админа)"""
     user_id = message.from_user.id
     
-    if not is_admin(user_id):
-        await message.reply(
-            "❌ Эта функция доступна только администратору.",
-            reply_markup=get_main_keyboard(user_id)
-        )
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
         return
     
-    # Останавливаем текущий процесс если есть
+    if not is_admin(user_id):
+        await message.reply("❌ Только для администратора.", reply_markup=get_main_keyboard(user_id))
+        return
+    
     if user_id in stop_flags:
         stop_flags[user_id] = True
     
-    # Закрываем все клиенты для админа
     if user_id in auth_data and 'client' in auth_data[user_id]:
         try:
             await auth_data[user_id]['client'].disconnect()
         except:
             pass
     
-    # Удаляем мастер-сессию
     remove_master_session()
     
-    # Очищаем данные авторизации
     if user_id in auth_data:
         del auth_data[user_id]
     
-    await message.reply(
-        "🚪 Вы вышли из аккаунта.\n\n"
-        "При следующем использовании нужно будет авторизоваться заново.",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("🚪 Вы вышли.", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "◀️ Назад")
 async def back_to_previous(message: types.Message):
-    """Возврат к предыдущему меню"""
     user_id = message.from_user.id
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     if user_id in user_data:
         current_state = user_data[user_id].get('state')
         
         if current_state == 'waiting_search_type':
             del user_data[user_id]
-            await message.reply(
-                "Главное меню:",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
         elif current_state == 'waiting_web_search_type':
             user_data[user_id]['state'] = 'waiting_search_type'
-            await message.reply(
-                "🔍 Выберите источник поиска:",
-                reply_markup=get_search_type_keyboard()
-            )
+            await message.reply("🔍 Выберите источник поиска:", reply_markup=get_search_type_keyboard())
         elif current_state in ['waiting_keywords', 'waiting_period']:
             del user_data[user_id]
-            await message.reply(
-                "Главное меню:",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
         else:
             del user_data[user_id]
-            await message.reply(
-                "Главное меню:",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
     else:
-        await message.reply(
-            "Главное меню:",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.text == "◀️ Назад в меню")
 async def back_to_menu(message: types.Message):
-    """Возврат в главное меню"""
     user_id = message.from_user.id
     
-    # Очищаем состояние пользователя
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     if user_id in user_data:
         del user_data[user_id]
     
-    await message.reply(
-        "Главное меню:",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_period')
 async def process_period(message: types.Message):
-    """Обработка выбора периода"""
     user_id = message.from_user.id
     period_text = message.text
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     period_hours = 0
     
@@ -1511,62 +1956,52 @@ async def process_period(message: types.Message):
     elif period_text == "⌨️ Свой период":
         await message.reply(
             f"⌨️ Введите свой период\n\n"
-            f"Примеры:\n"
-            f"• 30 минут\n"
-            f"• 2 часа\n"
-            f"• 5 дней\n"
-            f"• 90 мин\n"
-            f"• 24\n\n"
-            f"Максимальный период - {MAX_PERIOD_DAYS} дней\n"
-            f"(можно писать слитно: 30минут, 2часа, 5дней)",
+            f"Примеры: 30 минут, 2 часа, 5 дней",
             reply_markup=get_custom_period_keyboard()
         )
         user_data[user_id]['state'] = 'waiting_custom_period'
         return
     elif period_text == "◀️ Назад":
         if 'search_type' in user_data[user_id]:
-            await message.reply(
-                "🔍 Выберите источник поиска:",
-                reply_markup=get_search_type_keyboard()
-            )
+            await message.reply("🔍 Выберите источник:", reply_markup=get_search_type_keyboard())
             user_data[user_id]['state'] = 'waiting_search_type'
         else:
-            await message.reply(
-                "Главное меню:",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await message.reply("Главное меню:", reply_markup=get_main_keyboard(user_id))
             del user_data[user_id]
         return
     else:
-        await message.reply(
-            "❌ Пожалуйста, выбери период из кнопок",
-            reply_markup=get_period_keyboard()
-        )
+        await message.reply("❌ Выберите из кнопок", reply_markup=get_period_keyboard())
         return
     
     user_data[user_id]['period_hours'] = period_hours
     user_data[user_id]['period_text'] = period_text
     
-    await message.reply(
-        "🖼️ Выбери формат отчета:\n\n"
-        "• С картинками - будут сохранены все изображения\n"
-        "• Только текст - только текст, без картинок (быстрее)",
-        reply_markup=get_image_option_keyboard()
-    )
-    
-    user_data[user_id]['state'] = 'waiting_image_option'
+    # Если перевод доступен, предлагаем выбрать язык
+    if TRANSLATION_AVAILABLE:
+        await message.reply(
+            "🌍 Выберите язык перевода (или без перевода):",
+            reply_markup=get_translation_keyboard()
+        )
+        user_data[user_id]['state'] = 'waiting_translation'
+    else:
+        user_data[user_id]['translation_lang'] = 'ru'
+        await message.reply(
+            "🖼️ Выберите формат отчета:",
+            reply_markup=get_image_option_keyboard()
+        )
+        user_data[user_id]['state'] = 'waiting_image_option'
 
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_custom_period')
 async def process_custom_period(message: types.Message):
-    """Обработка ввода своего периода"""
     user_id = message.from_user.id
     period_text = message.text
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     if period_text == "◀️ Назад":
-        await message.reply(
-            "⏱ Выбери период времени",
-            reply_markup=get_period_keyboard()
-        )
+        await message.reply("⏱ Выберите период:", reply_markup=get_period_keyboard())
         user_data[user_id]['state'] = 'waiting_period'
         return
     
@@ -1574,23 +2009,14 @@ async def process_custom_period(message: types.Message):
     
     if period_hours is None or period_hours <= 0:
         await message.reply(
-            "❌ Не удалось распознать период.\n\n"
-            "Примеры правильного ввода:\n"
-            "• 30 минут\n"
-            "• 2 часа\n"
-            "• 5 дней\n"
-            "• 90 мин\n"
-            "• 24\n\n"
-            f"Максимальный период - {MAX_PERIOD_DAYS} дней\n"
-            "Попробуйте еще раз:",
+            "❌ Не удалось распознать период. Попробуйте еще раз:",
             reply_markup=get_custom_period_keyboard()
         )
         return
     
     if period_hours > MAX_PERIOD_HOURS:
         await message.reply(
-            f"❌ Период не может превышать {MAX_PERIOD_DAYS} дней.\n"
-            f"Введите меньший период:",
+            f"❌ Максимум {MAX_PERIOD_DAYS} дней. Введите меньший период:",
             reply_markup=get_custom_period_keyboard()
         )
         return
@@ -1598,39 +2024,78 @@ async def process_custom_period(message: types.Message):
     user_data[user_id]['period_hours'] = period_hours
     user_data[user_id]['period_text'] = period_text
     
-    await message.reply(
-        "🖼️ Выбери формат отчета:\n\n"
-        "• С картинками - будут сохранены все изображения\n"
-        "• Только текст - только текст, без картинок (быстрее)",
-        reply_markup=get_image_option_keyboard()
-    )
-    
-    user_data[user_id]['state'] = 'waiting_image_option'
+    if TRANSLATION_AVAILABLE:
+        await message.reply(
+            "🌍 Выберите язык перевода:",
+            reply_markup=get_translation_keyboard()
+        )
+        user_data[user_id]['state'] = 'waiting_translation'
+    else:
+        user_data[user_id]['translation_lang'] = 'ru'
+        await message.reply(
+            "🖼️ Выберите формат отчета:",
+            reply_markup=get_image_option_keyboard()
+        )
+        user_data[user_id]['state'] = 'waiting_image_option'
 
-@dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_image_option')
-async def process_image_option(message: types.Message):
-    """Обработка выбора - с картинками или без"""
+@dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_translation')
+async def process_translation(message: types.Message):
     user_id = message.from_user.id
     option = message.text
     
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
     if option == "◀️ Назад":
-        await message.reply(
-            "⏱ Выбери период времени",
-            reply_markup=get_period_keyboard()
-        )
+        await message.reply("⏱ Выберите период:", reply_markup=get_period_keyboard())
         user_data[user_id]['state'] = 'waiting_period'
         return
-    elif option not in ["🖼️ С картинками", "📝 Только текст"]:
+    
+    translation_map = {
+        "🇷🇺 На русский": 'ru',
+        "🇬🇧 На английский": 'en',
+        "🇩🇪 На немецкий": 'de',
+        "🇫🇷 На французский": 'fr',
+        "🇪🇸 На испанский": 'es',
+        "🇨🇳 На китайский": 'zh-cn',
+        "🔄 Без перевода": None
+    }
+    
+    if option in translation_map:
+        user_data[user_id]['translation_lang'] = translation_map[option]
         await message.reply(
-            "❌ Пожалуйста, выбери вариант из кнопок",
+            "🖼️ Выберите формат отчета:",
             reply_markup=get_image_option_keyboard()
         )
+        user_data[user_id]['state'] = 'waiting_image_option'
+    else:
+        await message.reply("❌ Выберите из кнопок", reply_markup=get_translation_keyboard())
+
+@dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_image_option')
+async def process_image_option(message: types.Message):
+    user_id = message.from_user.id
+    option = message.text
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
+    
+    if option == "◀️ Назад":
+        if TRANSLATION_AVAILABLE:
+            await message.reply("🌍 Выберите язык перевода:", reply_markup=get_translation_keyboard())
+            user_data[user_id]['state'] = 'waiting_translation'
+        else:
+            await message.reply("⏱ Выберите период:", reply_markup=get_period_keyboard())
+            user_data[user_id]['state'] = 'waiting_period'
+        return
+    elif option not in ["🖼️ С картинками", "📝 Только текст"]:
+        await message.reply("❌ Выберите из кнопок", reply_markup=get_image_option_keyboard())
         return
     
     save_images = (option == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    # Запускаем сбор в зависимости от типа поиска
     search_type = user_data[user_id].get('search_type', 'channels')
     
     if search_type == 'channels':
@@ -1638,8 +2103,7 @@ async def process_image_option(message: types.Message):
             f"🔍 Начинаю поиск по каналам\n"
             f"Период: {user_data[user_id]['period_text']}\n"
             f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
-            f"⏳ Это займет некоторое время...\n"
-            f"Чтобы остановить, нажми '⏹️ Стоп'",
+            f"⏳ Это займет время...",
             reply_markup=get_main_keyboard(user_id)
         )
         await collect_from_channels(user_id)
@@ -1648,20 +2112,16 @@ async def process_image_option(message: types.Message):
         await message.reply(
             f"🌍 Начинаю глобальный поиск по Telegram\n"
             f"Период: {user_data[user_id]['period_text']}\n"
-            f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
-            f"⏳ Это займет некоторое время...\n"
-            f"Чтобы остановить, нажми '⏹️ Стоп'",
+            f"Формат: {'с картинками' if save_images else 'только текст'}",
             reply_markup=get_main_keyboard(user_id)
         )
         await collect_global_telegram(user_id)
     
-    elif search_type in ['google', 'bing', 'all_engines']:
+    elif search_type in ['google', 'bing', 'yahoo', 'yandex', 'duckduckgo', 'baidu', 'ask', 'all_engines']:
         await message.reply(
             f"🔎 Начинаю поиск в интернете\n"
             f"Поисковик: {search_type}\n"
-            f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
-            f"⏳ Это займет некоторое время...\n"
-            f"Чтобы остановить, нажми '⏹️ Стоп'",
+            f"Формат: {'с картинками' if save_images else 'только текст'}",
             reply_markup=get_main_keyboard(user_id)
         )
         await collect_from_web(user_id)
@@ -1671,11 +2131,9 @@ async def process_image_option(message: types.Message):
             f"⚡ Начинаю комбинированный поиск\n"
             f"• По каналам из базы\n"
             f"• Глобальный поиск по Telegram\n"
-            f"• Поиск в интернете\n"
+            f"• Поиск в интернете (7 поисковиков)\n"
             f"Период: {user_data[user_id]['period_text']}\n"
-            f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
-            f"⏳ Это займет некоторое время...\n"
-            f"Чтобы остановить, нажми '⏹️ Стоп'",
+            f"Формат: {'с картинками' if save_images else 'только текст'}",
             reply_markup=get_main_keyboard(user_id)
         )
         await collect_combined(user_id)
@@ -1683,17 +2141,18 @@ async def process_image_option(message: types.Message):
     elif search_type == 'web_only':
         await message.reply(
             f"🔎 Начинаю поиск в интернете\n"
-            f"Формат: {'с картинками' if save_images else 'только текст'}\n\n"
-            f"⏳ Это займет некоторое время...\n"
-            f"Чтобы остановить, нажми '⏹️ Стоп'",
+            f"Формат: {'с картинками' if save_images else 'только текст'}",
             reply_markup=get_main_keyboard(user_id)
         )
         await collect_from_web(user_id)
 
-# ========== ФУНКЦИИ АВТОРИЗАЦИИ (только для админа) ==========
+# ========== АВТОРИЗАЦИЯ ==========
 async def start_authorization(user_id, message):
-    """Начинает процесс авторизации"""
     if not is_admin(user_id):
+        return
+    
+    if not security.check_brute_force(user_id, 'auth'):
+        await message.reply("❌ Слишком много попыток. Подождите.")
         return
     
     try:
@@ -1712,20 +2171,16 @@ async def start_authorization(user_id, message):
         }
         
         await message.reply(
-            "📱 Введи номер телефона\n\n"
-            "Формат: +7XXXXXXXXXX\n"
-            "Например: +79123456789\n\n"
-            "Или нажми '❌ Отменить авторизацию' для отмены.",
+            "📱 Введи номер телефона (например: +79123456789):",
             reply_markup=get_auth_keyboard()
         )
         
     except Exception as e:
-        await message.reply(f"❌ Ошибка при запуске авторизации: {str(e)}")
+        await message.reply(f"❌ Ошибка: {str(e)}")
         if user_id in auth_data:
             del auth_data[user_id]
 
 async def start_authorization_without_message(user_id):
-    """Начинает процесс авторизации без объекта message"""
     if not is_admin(user_id):
         return
     
@@ -1746,24 +2201,24 @@ async def start_authorization_without_message(user_id):
         
         await bot.send_message(
             user_id, 
-            "📱 Введи номер телефона\n\n"
-            "Формат: +7XXXXXXXXXX\n"
-            "Например: +79123456789\n\n"
-            "Или нажми '❌ Отменить авторизацию' для отмены.",
+            "📱 Введи номер телефона:",
             reply_markup=get_auth_keyboard()
         )
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Ошибка при запуске авторизации: {str(e)}")
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
         if user_id in auth_data:
             del auth_data[user_id]
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_phone')
 async def process_phone(message: types.Message):
-    """Обработка ввода номера телефона"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
+        return
+    
+    if not security.check_brute_force(user_id, 'auth'):
+        await message.reply("❌ Слишком много попыток.")
         return
     
     phone = message.text.strip()
@@ -1772,9 +2227,15 @@ async def process_phone(message: types.Message):
         await cancel_auth(message)
         return
     
+    # Валидация номера
+    valid, error = security.validate_input(phone, 20)
+    if not valid:
+        await message.reply(f"❌ {error}")
+        return
+    
     phone = re.sub(r'[^\d+]', '', phone)
     
-    status_msg = await message.reply("📲 Отправляю запрос на код подтверждения...")
+    status_msg = await message.reply("📲 Отправляю код...")
     
     try:
         client = auth_data[user_id]['client']
@@ -1786,51 +2247,29 @@ async def process_phone(message: types.Message):
         
         await status_msg.delete()
         await message.reply(
-            "🔐 Код подтверждения отправлен!\n\n"
-            "✅ Проверь Telegram на телефоне\n"
-            "✅ Код должен прийти в личные сообщения\n"
-            "✅ Введи код (только цифры)\n\n"
-            "Код действует ограниченное время. Введи его быстро!\n\n"
-            "Или нажми '❌ Отменить авторизацию' для отмены.",
+            "🔐 Введи код из Telegram (только цифры):",
             reply_markup=get_auth_keyboard()
         )
         
+    except FloodWaitError as e:
+        await status_msg.delete()
+        await message.reply(f"⏳ Подождите {e.seconds} секунд")
     except Exception as e:
         await status_msg.delete()
-        error_text = str(e)
-        
-        if "FLOOD_WAIT" in error_text:
-            wait_time = re.search(r'(\d+)', error_text)
-            wait = wait_time.group(1) if wait_time else "несколько"
-            await message.reply(
-                f"⏳ Слишком много попыток\n\n"
-                f"Нужно подождать {wait} секунд",
-                reply_markup=get_main_keyboard(user_id)
-            )
-        elif "PHONE_NUMBER_INVALID" in error_text:
-            await message.reply(
-                "❌ Неверный формат номера\n\n"
-                "Используй формат: +79123456789\n\n"
-                "Попробуй снова:",
-                reply_markup=get_auth_keyboard()
-            )
-            return
-        else:
-            await message.reply(
-                f"❌ Ошибка: {error_text[:200]}",
-                reply_markup=get_main_keyboard(user_id)
-            )
-        
+        await message.reply(f"❌ Ошибка: {str(e)[:200]}")
         await client.disconnect()
         if user_id in auth_data:
             del auth_data[user_id]
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_code')
 async def process_code(message: types.Message):
-    """Обработка ввода кода подтверждения"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
+        return
+    
+    if not security.check_brute_force(user_id, 'code'):
+        await message.reply("❌ Слишком много попыток ввода кода.")
         return
     
     code = message.text.strip()
@@ -1839,9 +2278,15 @@ async def process_code(message: types.Message):
         await cancel_auth(message)
         return
     
+    # Валидация кода
+    valid, error = security.validate_input(code, 10)
+    if not valid:
+        await message.reply(f"❌ {error}")
+        return
+    
     code = re.sub(r'\D', '', code)
     
-    status_msg = await message.reply(f"🔐 Проверяю код...")
+    status_msg = await message.reply("🔐 Проверяю код...")
     
     try:
         client = auth_data[user_id]['client']
@@ -1858,11 +2303,8 @@ async def process_code(message: types.Message):
         
         await message.reply(
             f"✅ *Авторизация успешна!*\n\n"
-            f"Мастер-аккаунт: {me.first_name}\n"
-            f"Username: @{me.username}\n"
-            f"Телефон: {phone}\n\n"
-            f"Теперь все пользователи могут пользоваться ботом.\n"
-            f"Нажми '🔍 Расширенный поиск' для начала работы.",
+            f"Аккаунт: {me.first_name}\n"
+            f"Username: @{me.username}",
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(user_id)
         )
@@ -1874,54 +2316,25 @@ async def process_code(message: types.Message):
         await status_msg.delete()
         auth_data[user_id]['state'] = 'waiting_password'
         await message.reply(
-            "🔐 Требуется пароль двухфакторной аутентификации\n\n"
-            "Введи свой пароль:",
+            "🔐 Требуется пароль двухфакторки. Введи пароль:",
             reply_markup=get_auth_keyboard()
         )
     except PhoneCodeExpiredError:
         await status_msg.delete()
-        await message.reply(
-            "❌ Код истек\n\n"
-            "Нажми '🔄 Сменить аккаунт' и попробуй снова, или введи номер заново:",
-            reply_markup=get_auth_keyboard()
-        )
+        await message.reply("❌ Код истек. Введи номер заново:")
         auth_data[user_id]['state'] = 'waiting_phone'
     except PhoneCodeInvalidError:
         await status_msg.delete()
-        await message.reply(
-            "❌ Неверный код!\n\n"
-            "Попробуй ввести ещё раз (только цифры):",
-            reply_markup=get_auth_keyboard()
-        )
+        await message.reply("❌ Неверный код. Попробуй еще раз:")
     except Exception as e:
         await status_msg.delete()
-        error_text = str(e)
-        
-        if "CODE_INVALID" in error_text:
-            await message.reply(
-                "❌ Неверный код!\n\n"
-                "Попробуй ввести ещё раз (только цифры):",
-                reply_markup=get_auth_keyboard()
-            )
-        elif "CODE_EXPIRED" in error_text:
-            await message.reply(
-                "❌ Код истек\n\n"
-                "Введи номер телефона заново:",
-                reply_markup=get_auth_keyboard()
-            )
-            auth_data[user_id]['state'] = 'waiting_phone'
-        else:
-            await message.reply(
-                f"❌ Ошибка: {error_text[:200]}",
-                reply_markup=get_main_keyboard(user_id)
-            )
-            await client.disconnect()
-            if user_id in auth_data:
-                del auth_data[user_id]
+        await message.reply(f"❌ Ошибка: {str(e)[:200]}")
+        await client.disconnect()
+        if user_id in auth_data:
+            del auth_data[user_id]
 
 @dp.message_handler(lambda message: message.from_user.id in auth_data and auth_data[message.from_user.id].get('state') == 'waiting_password')
 async def process_password(message: types.Message):
-    """Обработка ввода пароля двухфакторки"""
     user_id = message.from_user.id
     
     if not is_admin(user_id):
@@ -1944,10 +2357,7 @@ async def process_password(message: types.Message):
         
         await message.reply(
             f"✅ *Авторизация успешна!*\n\n"
-            f"Мастер-аккаунт: {me.first_name}\n"
-            f"Username: @{me.username}\n\n"
-            f"Теперь все пользователи могут пользоваться ботом.\n"
-            f"Нажми '🔍 Расширенный поиск' для начала работы.",
+            f"Аккаунт: {me.first_name}",
             parse_mode='Markdown',
             reply_markup=get_main_keyboard(user_id)
         )
@@ -1956,28 +2366,25 @@ async def process_password(message: types.Message):
             del auth_data[user_id]
         
     except Exception as e:
-        await message.reply(
-            f"❌ Неверный пароль!\n\n"
-            f"Попробуй ещё раз:",
-            reply_markup=get_auth_keyboard()
-        )
+        await message.reply(f"❌ Неверный пароль. Попробуй еще раз:", reply_markup=get_auth_keyboard())
 
-# ========== ОБРАБОТЧИКИ ТЕКСТОВЫХ СООБЩЕНИЙ ==========
+# ========== ОБРАБОТЧИКИ ТЕКСТА ==========
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_channel_link')
 async def process_channel_link(message: types.Message):
-    """Обрабатывает добавление канала по ссылке (канал добавляется в общий список)"""
     try:
         user_id = message.from_user.id
         link = message.text.strip()
         
-        # Нормализуем ссылку
+        # Валидация ссылки
+        valid, error = security.validate_input(link, 200)
+        if not valid:
+            await message.reply(f"❌ {error}")
+            return
+        
         link = normalize_channel_url(link)
+        channel_name = extract_channel_name(link) or link.split('/')[-1]
         
-        channel_name = extract_channel_name(link)
-        if not channel_name:
-            channel_name = link.split('/')[-1]
-        
-        status_msg = await message.reply("🔄 Проверяю доступность канала...")
+        status_msg = await message.reply("🔄 Проверяю канал...")
         
         try:
             global MASTER_SESSION
@@ -1991,38 +2398,32 @@ async def process_channel_link(message: types.Message):
                         channel_name = entity.title
                 
                 await client.disconnect()
-            
-        except Exception as e:
+        except:
             pass
         
         await status_msg.delete()
         
-        # Загружаем общий список каналов
         channels = load_channels()
         
-        # Проверяем, нет ли уже такого канала
         for ch in channels:
             if ch['url'] == link or ch['name'].lower() == channel_name.lower():
                 await message.reply(
-                    f"❌ Канал {channel_name} уже есть в общем списке!\n"
-                    f"Ссылка: {ch['url']}",
+                    f"❌ Канал уже есть!",
                     reply_markup=get_main_keyboard(user_id)
                 )
                 del user_data[user_id]
                 return
         
-        # Добавляем канал в общий список
         channels.append({'name': channel_name, 'url': link})
         save_channels(channels)
         
         del user_data[user_id]
         
         await message.reply(
-            f"✅ Канал успешно добавлен в общий список!\n\n"
-            f"📌 Название: {channel_name}\n"
-            f"🔗 Ссылка: {link}\n\n"
-            f"Теперь этот канал доступен всем пользователям бота.\n"
-            f"Всего каналов в базе: {len(channels)}",
+            f"✅ Канал добавлен!\n\n"
+            f"Название: {channel_name}\n"
+            f"Ссылка: {link}\n"
+            f"Всего каналов: {len(channels)}",
             reply_markup=get_main_keyboard(user_id)
         )
         
@@ -2031,24 +2432,25 @@ async def process_channel_link(message: types.Message):
 
 @dp.message_handler(lambda message: message.from_user.id in user_data and user_data[message.from_user.id].get('state') == 'waiting_keywords')
 async def process_keywords(message: types.Message):
-    """Обрабатывает ключевые слова и запускает выбор периода"""
     keywords = message.text.strip()
     user_id = message.from_user.id
+    
+    # Валидация ключевых слов
+    valid, error = security.validate_input(keywords, 200)
+    if not valid:
+        await message.reply(f"❌ {error}")
+        return
     
     user_data[user_id]['keywords'] = keywords
     
     await message.reply(
-        "⏱ Выбери период времени\n\n"
-        f"Максимальный период: {MAX_PERIOD_DAYS} дней\n"
-        "За какой период собирать информацию?",
+        "⏱ Выбери период времени:",
         reply_markup=get_period_keyboard()
     )
-    
     user_data[user_id]['state'] = 'waiting_period'
 
-# ========== ФУНКЦИИ СБОРА ДАННЫХ ==========
+# ========== СБОР ДАННЫХ ==========
 async def collect_from_channels(user_id):
-    """Сбор данных из каналов базы"""
     client = None
     try:
         stop_flags[user_id] = False
@@ -2057,6 +2459,7 @@ async def collect_from_channels(user_id):
         channels = user_data[user_id].get('channels', load_channels())
         period_hours = user_data[user_id].get('period_hours', 168)
         save_images = user_data[user_id].get('save_images', True)
+        translation_lang = user_data[user_id].get('translation_lang', 'ru')
         
         await bot.send_message(user_id, "🔄 Подключаюсь к Telegram...")
         
@@ -2065,25 +2468,19 @@ async def collect_from_channels(user_id):
             MASTER_SESSION = load_master_session()
         
         if not MASTER_SESSION:
-            await bot.send_message(user_id, 
-                "❌ Мастер-сессия не найдена. Обратитесь к администратору.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await bot.send_message(user_id, "❌ Мастер-сессия не найдена.", reply_markup=get_main_keyboard(user_id))
             return
         
         client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
         await client.connect()
         
         if not await client.is_user_authorized():
-            await bot.send_message(user_id, 
-                "❌ Мастер-сессия не активна. Администратору нужно авторизоваться заново.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await bot.send_message(user_id, "❌ Мастер-сессия не активна.", reply_markup=get_main_keyboard(user_id))
             await client.disconnect()
             remove_master_session()
             return
         
-        await bot.send_message(user_id, f"✅ Подключение установлено! Начинаю сбор...")
+        await bot.send_message(user_id, "✅ Подключено! Начинаю сбор...")
         
         doc = Document()
         
@@ -2091,10 +2488,12 @@ async def collect_from_channels(user_id):
         title.alignment = 1
         
         now_utc10 = datetime.now(UTC_PLUS_10)
-        doc.add_paragraph(f"Дата формирования: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Тип поиска: По каналам из базы")
+        doc.add_paragraph(f"Дата: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
+        doc.add_paragraph(f"Тип: По каналам из базы")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
+        if translation_lang:
+            doc.add_paragraph(f"Перевод: {'Да' if translation_lang else 'Нет'}")
         doc.add_paragraph()
         
         total_posts = 0
@@ -2108,14 +2507,11 @@ async def collect_from_channels(user_id):
         for channel in channels:
             if stop_flags.get(user_id, False):
                 stopped_early = True
-                await bot.send_message(user_id, 
-                    f"⏹️ Формирование отчета остановлено по вашему запросу.\n"
-                    f"Обработано каналов: {processed_channels}/{len(channels)}"
-                )
+                await bot.send_message(user_id, f"⏹️ Остановлено. Обработано: {processed_channels}/{len(channels)}")
                 break
             
             processed_channels += 1
-            await bot.send_message(user_id, f"📱 [{processed_channels}/{len(channels)}] Анализирую: {channel['name']}")
+            await bot.send_message(user_id, f"📱 [{processed_channels}/{len(channels)}] {channel['name']}")
             
             try:
                 channel_url = normalize_channel_url(channel['url'])
@@ -2127,7 +2523,6 @@ async def collect_from_channels(user_id):
                 async for message in client.iter_messages(entity, offset_date=now, reverse=False):
                     if posts_count % 5 == 0 and stop_flags.get(user_id, False):
                         stopped_early = True
-                        await bot.send_message(user_id, f"⏹️ Останавливаю анализ канала {channel['name']}...")
                         break
                     
                     if message.date:
@@ -2143,7 +2538,7 @@ async def collect_from_channels(user_id):
                         total_posts += 1
                         
                         if posts_count % 20 == 0:
-                            await bot.send_message(user_id, f"📊 Найдено {posts_count} постов в канале {channel['name']}...")
+                            await bot.send_message(user_id, f"📊 Найдено {posts_count} постов...")
                 
                 if posts_count > 0:
                     channels_with_posts += 1
@@ -2161,7 +2556,16 @@ async def collect_from_channels(user_id):
                             text = message.text
                             if len(text) > 5000:
                                 text = text[:5000] + "..."
-                            p.add_run(text)
+                            
+                            # Перевод текста, если нужно
+                            if translation_lang:
+                                trans_result = await translator.translate(text, translation_lang)
+                                if trans_result['was_translated']:
+                                    p.add_run(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
+                                else:
+                                    p.add_run(text)
+                            else:
+                                p.add_run(text)
                         
                         if save_images and message.media:
                             if hasattr(message.media, 'photo'):
@@ -2171,68 +2575,55 @@ async def collect_from_channels(user_id):
                                     add_image_to_doc(doc, image_path)
                             
                             if hasattr(message.media, 'document') and message.media.document:
-                                if hasattr(message.media.document, 'mime_type'):
-                                    mime = message.media.document.mime_type
-                                    if 'image' in mime:
-                                        image_path = await download_media(message, user_id, client)
-                                        if image_path:
-                                            doc.add_paragraph()
-                                            add_image_to_doc(doc, image_path)
+                                mime = message.media.document.mime_type
+                                if mime and 'image' in mime:
+                                    image_path = await download_media(message, user_id, client)
+                                    if image_path:
+                                        doc.add_paragraph()
+                                        add_image_to_doc(doc, image_path)
                         
                         if message.id:
                             channel_username = channel_url.split('/')[-1]
-                            link_text = f"🔗 Ссылка на пост"
                             link_url = f"https://t.me/{channel_username}/{message.id}"
-                            
                             link_paragraph = doc.add_paragraph()
-                            add_hyperlink(link_paragraph, link_text, link_url)
+                            add_hyperlink(link_paragraph, "🔗 Ссылка", link_url)
                         
                         doc.add_paragraph()
                     
-                    doc.add_paragraph(f"✅ Найдено постов: {posts_count}")
+                    doc.add_paragraph(f"✅ Найдено: {posts_count}")
                     doc.add_page_break()
                 
                 if stop_flags.get(user_id, False):
                     stopped_early = True
-                    await bot.send_message(user_id, f"⏹️ Анализ канала {channel['name']} прерван.")
                     break
                 
             except FloodWaitError as e:
                 wait_time = e.seconds
-                await bot.send_message(
-                    user_id, 
-                    f"⚠️ Превышен лимит запросов. Жду {wait_time} секунд..."
-                )
+                await bot.send_message(user_id, f"⚠️ Лимит. Жду {wait_time} сек...")
                 await asyncio.sleep(wait_time)
                 continue
-                
             except Exception as e:
-                error_msg = str(e)
-                await bot.send_message(user_id, f"⚠️ Ошибка с каналом {channel['name']}: {error_msg[:200]}")
-                doc.add_paragraph(f"❌ Ошибка доступа к каналу: {channel['name']}")
+                await bot.send_message(user_id, f"⚠️ Ошибка: {str(e)[:100]}")
+                doc.add_paragraph(f"❌ Ошибка: {channel['name']}")
                 doc.add_page_break()
         
-        doc.add_heading('Итоговая статистика', level=1)
-        doc.add_paragraph(f"Всего обработано каналов: {processed_channels}/{len(channels)}")
-        doc.add_paragraph(f"Каналов с найденными постами: {channels_with_posts}")
-        doc.add_paragraph(f"Всего найдено постов: {total_posts}")
+        doc.add_heading('Статистика', level=1)
+        doc.add_paragraph(f"Обработано каналов: {processed_channels}/{len(channels)}")
+        doc.add_paragraph(f"Каналов с постами: {channels_with_posts}")
+        doc.add_paragraph(f"Всего постов: {total_posts}")
         doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
-        doc.add_paragraph(f"Формат отчета: {'с картинками' if save_images else 'только текст'}")
+        doc.add_paragraph(f"Формат: {'с картинками' if save_images else 'только текст'}")
         if stopped_early:
-            doc.add_paragraph("⚠️ Отчет был остановлен досрочно по запросу пользователя")
+            doc.add_paragraph("⚠️ Остановлено досрочно")
         
         if total_posts == 0:
             await bot.send_message(
                 user_id, 
-                f"📭 Поиск завершен\n\n"
-                f"За период {user_data[user_id].get('period_text', format_period(period_hours))} не найдено постов, соответствующих запросу: {keywords}\n"
-                f"Проверено каналов: {len(channels)}",
+                f"📭 Ничего не найдено по запросу: {keywords}",
                 reply_markup=get_main_keyboard(user_id)
             )
-            
             if user_id in user_data:
                 del user_data[user_id]
-            
             await client.disconnect()
             return
         
@@ -2241,19 +2632,16 @@ async def collect_from_channels(user_id):
         
         with open(output_file, 'rb') as f:
             caption = f"✅ Отчет готов!\n\n"
-            caption += f"📊 Найдено постов: {total_posts}\n"
-            caption += f"📁 Каналов с постами: {channels_with_posts}/{processed_channels}\n"
-            caption += f"🔍 Ключевые слова: {keywords}\n"
+            caption += f"📊 Постов: {total_posts}\n"
+            caption += f"📁 Каналов: {channels_with_posts}/{processed_channels}\n"
+            caption += f"🔍 Слова: {keywords}\n"
             caption += f"⏱ Период: {user_data[user_id].get('period_text', format_period(period_hours))}\n"
-            caption += f"🖼️ Формат: {'с картинками' if save_images else 'только текст'}\n"
+            if translation_lang:
+                caption += f"🌍 Перевод: {translation_lang}\n"
             if stopped_early:
-                caption += f"⚠️ Отчет остановлен досрочно\n"
+                caption += f"⚠️ Остановлено\n"
             
-            await bot.send_document(
-                user_id, 
-                f, 
-                caption=caption
-            )
+            await bot.send_document(user_id, f, caption=caption)
         
         if os.path.exists(output_file):
             os.remove(output_file)
@@ -2269,17 +2657,13 @@ async def collect_from_channels(user_id):
             del stop_flags[user_id]
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Произошла ошибка: {str(e)}")
-        logging.error(f"Error for user {user_id}: {e}")
-        
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+        logging.error(f"Error: {e}")
         cleanup_temp_files(user_id)
-        
         if user_id in user_data:
             del user_data[user_id]
-        
         if user_id in stop_flags:
             del stop_flags[user_id]
-        
         if client:
             await client.disconnect()
 
@@ -2292,50 +2676,45 @@ async def collect_global_telegram(user_id):
         keywords = user_data[user_id]['keywords']
         period_hours = user_data[user_id].get('period_hours', 168)
         save_images = user_data[user_id].get('save_images', True)
+        translation_lang = user_data[user_id].get('translation_lang', 'ru')
         
-        await bot.send_message(user_id, "🔄 Подключаюсь к Telegram для глобального поиска...")
+        await bot.send_message(user_id, "🔄 Подключаюсь для глобального поиска...")
         
         global MASTER_SESSION
         if not MASTER_SESSION:
             MASTER_SESSION = load_master_session()
         
         if not MASTER_SESSION:
-            await bot.send_message(user_id, 
-                "❌ Мастер-сессия не найдена. Обратитесь к администратору.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await bot.send_message(user_id, "❌ Мастер-сессия не найдена.", reply_markup=get_main_keyboard(user_id))
             return
         
         client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
         await client.connect()
         
         if not await client.is_user_authorized():
-            await bot.send_message(user_id, 
-                "❌ Мастер-сессия не активна. Администратору нужно авторизоваться заново.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await bot.send_message(user_id, "❌ Мастер-сессия не активна.", reply_markup=get_main_keyboard(user_id))
             await client.disconnect()
             remove_master_session()
             return
         
-        await bot.send_message(user_id, f"✅ Подключение установлено! Выполняю глобальный поиск...")
+        await bot.send_message(user_id, "✅ Подключено! Выполняю поиск...")
         
         doc = Document()
         
-        title = doc.add_heading('Отчёт по глобальному поиску в Telegram', 0)
+        title = doc.add_heading('Глобальный поиск в Telegram', 0)
         title.alignment = 1
         
         now_utc10 = datetime.now(UTC_PLUS_10)
-        doc.add_paragraph(f"Дата формирования: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Тип поиска: Глобальный по всему Telegram")
+        doc.add_paragraph(f"Дата: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
+        if translation_lang:
+            doc.add_paragraph(f"Перевод: {'Да' if translation_lang else 'Нет'}")
         doc.add_paragraph()
         
         start_time = datetime.now().astimezone() - timedelta(hours=period_hours)
         
-        # Выполняем глобальный поиск
-        await bot.send_message(user_id, "🌍 Ищу сообщения по всему Telegram...")
+        await bot.send_message(user_id, "🌍 Ищу по всему Telegram...")
         
         try:
             result = await client(SearchGlobalRequest(
@@ -2356,102 +2735,104 @@ async def collect_global_telegram(user_id):
                     if stop_flags.get(user_id, False):
                         break
                     
-                    if hasattr(msg, 'message') and msg.message:
-                        total_posts += 1
-                        
-                        # Получаем информацию о чате с проверкой на None
+                    # Пропускаем сообщения без текста
+                    if not hasattr(msg, 'message') or not msg.message:
+                        continue
+                    
+                    total_posts += 1
+                    
+                    # Получаем информацию о чате с проверкой на None
+                    chat_title = 'Неизвестный чат'
+                    chat_username = None
+                    
+                    try:
+                        if msg.peer_id:  # Проверяем, что peer_id не None
+                            chat = await client.get_entity(msg.peer_id)
+                            chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                            chat_username = getattr(chat, 'username', None)
+                        else:
+                            # Если peer_id None, пропускаем это сообщение
+                            continue
+                    except Exception as e:
+                        # Если не удалось получить информацию, используем заглушку
                         chat_title = 'Неизвестный чат'
                         chat_username = None
+                    
+                    doc.add_heading(f"Чат: {chat_title}", level=2)
+                    if chat_username:
+                        doc.add_paragraph(f"Ссылка: https://t.me/{chat_username}")
+                    
+                    p = doc.add_paragraph()
+                    display_date = format_datetime_utc10(msg.date)
+                    p.add_run(f"📅 {display_date}\n").bold = True
+                    
+                    if msg.message:
+                        text = msg.message
+                        if len(text) > 5000:
+                            text = text[:5000] + "..."
                         
-                        try:
-                            if msg.peer_id:  # Проверяем, что peer_id не None
-                                chat = await client.get_entity(msg.peer_id)
-                                chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                                chat_username = getattr(chat, 'username', None)
+                        # Перевод текста
+                        if translation_lang:
+                            trans_result = await translator.translate(text, translation_lang)
+                            if trans_result['was_translated']:
+                                p.add_run(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
                             else:
-                                # Если peer_id None, пропускаем сообщение
-                                await bot.send_message(user_id, f"⚠️ Пропущено сообщение без информации о чате")
-                                continue
-                        except Exception as e:
-                            # Если не удалось получить информацию о чате, используем заглушку
-                            chat_title = 'Неизвестный чат'
-                            chat_username = None
-                            await bot.send_message(user_id, f"⚠️ Не удалось получить информацию о чате для сообщения")
-                        
-                        doc.add_heading(f"Чат: {chat_title}", level=2)
-                        if chat_username:
-                            doc.add_paragraph(f"Ссылка: https://t.me/{chat_username}")
-                        
-                        p = doc.add_paragraph()
-                        display_date = format_datetime_utc10(msg.date)
-                        p.add_run(f"📅 {display_date}\n").bold = True
-                        
-                        if msg.message:
-                            text = msg.message
-                            if len(text) > 5000:
-                                text = text[:5000] + "..."
+                                p.add_run(text)
+                        else:
                             p.add_run(text)
-                        
-                        if save_images and msg.media:
-                            if hasattr(msg.media, 'photo'):
-                                image_path = await download_media(msg, user_id, client)
-                                if image_path:
-                                    doc.add_paragraph()
-                                    add_image_to_doc(doc, image_path)
-                        
-                        if chat_username and msg.id:
-                            link_text = f"🔗 Ссылка на сообщение"
-                            link_url = f"https://t.me/{chat_username}/{msg.id}"
-                            link_paragraph = doc.add_paragraph()
-                            add_hyperlink(link_paragraph, link_text, link_url)
-                        
-                        doc.add_paragraph()
-                        
-                        if total_posts % 10 == 0:
-                            await bot.send_message(user_id, f"📊 Найдено {total_posts} сообщений...")
+                    
+                    if save_images and msg.media:
+                        if hasattr(msg.media, 'photo'):
+                            image_path = await download_media(msg, user_id, client)
+                            if image_path:
+                                doc.add_paragraph()
+                                add_image_to_doc(doc, image_path)
+                    
+                    if chat_username and msg.id:
+                        link_url = f"https://t.me/{chat_username}/{msg.id}"
+                        link_paragraph = doc.add_paragraph()
+                        add_hyperlink(link_paragraph, "🔗 Ссылка", link_url)
+                    
+                    doc.add_paragraph()
+                    
+                    if total_posts % 10 == 0:
+                        await bot.send_message(user_id, f"📊 Найдено {total_posts}...")
             
-            doc.add_heading('Итоговая статистика', level=1)
-            doc.add_paragraph(f"Всего найдено сообщений: {total_posts}")
+            doc.add_heading('Статистика', level=1)
+            doc.add_paragraph(f"Всего сообщений: {total_posts}")
             doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
-            doc.add_paragraph(f"Формат отчета: {'с картинками' if save_images else 'только текст'}")
+            doc.add_paragraph(f"Формат: {'с картинками' if save_images else 'только текст'}")
             
             if total_posts == 0:
                 await bot.send_message(
                     user_id, 
-                    f"📭 Глобальный поиск завершен\n\n"
-                    f"За период {user_data[user_id].get('period_text', format_period(period_hours))} не найдено сообщений, соответствующих запросу: {keywords}",
+                    f"📭 Ничего не найдено: {keywords}",
                     reply_markup=get_main_keyboard(user_id)
                 )
-                
                 if user_id in user_data:
                     del user_data[user_id]
-                
                 await client.disconnect()
                 return
             
-            output_file = f"global_report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+            output_file = f"global_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
             doc.save(output_file)
             
             with open(output_file, 'rb') as f:
                 caption = f"✅ Глобальный поиск завершен!\n\n"
-                caption += f"📊 Найдено сообщений: {total_posts}\n"
-                caption += f"🔍 Ключевые слова: {keywords}\n"
+                caption += f"📊 Найдено: {total_posts}\n"
+                caption += f"🔍 Слова: {keywords}\n"
                 caption += f"⏱ Период: {user_data[user_id].get('period_text', format_period(period_hours))}\n"
-                caption += f"🖼️ Формат: {'с картинками' if save_images else 'только текст'}\n"
+                if translation_lang:
+                    caption += f"🌍 Перевод: {translation_lang}\n"
                 
-                await bot.send_document(
-                    user_id, 
-                    f, 
-                    caption=caption
-                )
+                await bot.send_document(user_id, f, caption=caption)
             
             if os.path.exists(output_file):
                 os.remove(output_file)
             
         except Exception as e:
-            error_msg = str(e)
-            await bot.send_message(user_id, f"❌ Ошибка при глобальном поиске: {error_msg}")
-            doc.add_paragraph(f"❌ Ошибка при выполнении поиска: {error_msg}")
+            await bot.send_message(user_id, f"❌ Ошибка поиска: {str(e)}")
+            doc.add_paragraph(f"❌ Ошибка: {str(e)}")
         
         cleanup_temp_files(user_id)
         
@@ -2464,52 +2845,76 @@ async def collect_global_telegram(user_id):
             del stop_flags[user_id]
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Произошла ошибка: {str(e)}")
-        logging.error(f"Error for user {user_id}: {e}")
-        
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+        logging.error(f"Error: {e}")
         cleanup_temp_files(user_id)
-        
         if user_id in user_data:
             del user_data[user_id]
-        
         if user_id in stop_flags:
             del stop_flags[user_id]
-        
         if client:
             await client.disconnect()
 
 async def collect_from_web(user_id):
-    """Сбор данных из интернета"""
+    """Сбор данных из интернета (7 поисковиков)"""
     try:
         stop_flags[user_id] = False
         
         keywords = user_data[user_id]['keywords']
-        search_type = user_data[user_id].get('search_type', 'google')
+        search_type = user_data[user_id].get('search_type', 'all_engines')
         save_images = user_data[user_id].get('save_images', True)
+        translation_lang = user_data[user_id].get('translation_lang', 'ru')
         
         await bot.send_message(user_id, "🌐 Начинаю поиск в интернете...")
         
         doc = Document()
         
-        title = doc.add_heading('Отчёт по поиску в интернете', 0)
+        title = doc.add_heading('Поиск в интернете', 0)
         title.alignment = 1
         
         now_utc10 = datetime.now(UTC_PLUS_10)
-        doc.add_paragraph(f"Дата формирования: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Тип поиска: {search_type}")
+        doc.add_paragraph(f"Дата: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
+        if translation_lang:
+            doc.add_paragraph(f"Перевод: {'Да' if translation_lang else 'Нет'}")
         doc.add_paragraph()
         
         total_results = 0
         
-        # Поиск в Google
-        if search_type in ['google', 'all_engines']:
-            await bot.send_message(user_id, "🔍 Ищу в Google...")
-            google_results = await search_google(keywords, 20)
+        # Определяем, какие поисковики использовать
+        engines_to_use = []
+        if search_type == 'all_engines':
+            engines_to_use = ['google', 'bing', 'yahoo', 'yandex', 'duckduckgo', 'baidu', 'ask']
+        else:
+            engines_to_use = [search_type]
+        
+        # Поиск в каждом поисковике
+        for engine in engines_to_use:
+            if stop_flags.get(user_id, False):
+                break
             
-            if google_results:
-                doc.add_heading('Результаты Google', level=1)
-                for result in google_results:
+            await bot.send_message(user_id, f"🔍 Ищу в {engine.capitalize()}...")
+            
+            if engine == 'google':
+                results = await web_search.search_google(keywords, 15)
+            elif engine == 'bing':
+                results = await web_search.search_bing(keywords, 15)
+            elif engine == 'yahoo':
+                results = await web_search.search_yahoo(keywords, 15)
+            elif engine == 'yandex':
+                results = await web_search.search_yandex(keywords, 15)
+            elif engine == 'duckduckgo':
+                results = await web_search.search_duckduckgo(keywords, 15)
+            elif engine == 'baidu':
+                results = await web_search.search_baidu(keywords, 15)
+            elif engine == 'ask':
+                results = await web_search.search_ask(keywords, 15)
+            else:
+                results = []
+            
+            if results:
+                doc.add_heading(f'{engine.capitalize()}', level=1)
+                for result in results:
                     if stop_flags.get(user_id, False):
                         break
                     
@@ -2521,69 +2926,50 @@ async def collect_from_web(user_id):
                     add_hyperlink(p, result['link'], result['link'])
                     
                     if result['description']:
-                        doc.add_paragraph(result['description'])
+                        desc = result['description']
+                        
+                        # Перевод описания
+                        if translation_lang:
+                            trans_result = await translator.translate(desc, translation_lang)
+                            if trans_result['was_translated']:
+                                doc.add_paragraph(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
+                            else:
+                                doc.add_paragraph(desc)
+                        else:
+                            doc.add_paragraph(desc)
                     
                     doc.add_paragraph()
                     total_results += 1
                 
                 doc.add_page_break()
         
-        # Поиск в Bing
-        if search_type in ['bing', 'all_engines'] and not stop_flags.get(user_id, False):
-            await bot.send_message(user_id, "🔎 Ищу в Bing...")
-            bing_results = await search_bing(keywords, 20)
-            
-            if bing_results:
-                doc.add_heading('Результаты Bing', level=1)
-                for result in bing_results:
-                    if stop_flags.get(user_id, False):
-                        break
-                    
-                    doc.add_heading(result['title'], level=2)
-                    doc.add_paragraph(f"Источник: {result['source']}")
-                    
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, result['link'], result['link'])
-                    
-                    if result['description']:
-                        doc.add_paragraph(result['description'])
-                    
-                    doc.add_paragraph()
-                    total_results += 1
-        
-        doc.add_heading('Итоговая статистика', level=1)
-        doc.add_paragraph(f"Всего найдено результатов: {total_results}")
+        doc.add_heading('Статистика', level=1)
+        doc.add_paragraph(f"Всего результатов: {total_results}")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
-        doc.add_paragraph(f"Поисковые системы: {search_type}")
+        doc.add_paragraph(f"Поисковики: {', '.join(engines_to_use)}")
         
         if total_results == 0:
             await bot.send_message(
                 user_id, 
-                f"📭 Поиск в интернете завершен\n\n"
-                f"Не найдено результатов для запроса: {keywords}",
+                f"📭 Ничего не найдено: {keywords}",
                 reply_markup=get_main_keyboard(user_id)
             )
-            
             if user_id in user_data:
                 del user_data[user_id]
-            
             return
         
-        output_file = f"web_report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+        output_file = f"web_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
         doc.save(output_file)
         
         with open(output_file, 'rb') as f:
             caption = f"✅ Поиск в интернете завершен!\n\n"
-            caption += f"📊 Найдено результатов: {total_results}\n"
-            caption += f"🔍 Ключевые слова: {keywords}\n"
-            caption += f"🌐 Поисковики: {search_type}\n"
+            caption += f"📊 Результатов: {total_results}\n"
+            caption += f"🔍 Слова: {keywords}\n"
+            caption += f"🌐 Поисковики: {len(engines_to_use)}\n"
+            if translation_lang:
+                caption += f"🌍 Перевод: {translation_lang}\n"
             
-            await bot.send_document(
-                user_id, 
-                f, 
-                caption=caption
-            )
+            await bot.send_document(user_id, f, caption=caption)
         
         if os.path.exists(output_file):
             os.remove(output_file)
@@ -2597,25 +2983,23 @@ async def collect_from_web(user_id):
             del stop_flags[user_id]
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Произошла ошибка: {str(e)}")
-        logging.error(f"Error for user {user_id}: {e}")
-        
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+        logging.error(f"Error: {e}")
         cleanup_temp_files(user_id)
-        
         if user_id in user_data:
             del user_data[user_id]
-        
         if user_id in stop_flags:
             del stop_flags[user_id]
 
 async def collect_combined(user_id):
-    """Комбинированный сбор данных из всех источников"""
+    """Комбинированный поиск"""
     try:
         stop_flags[user_id] = False
         
         keywords = user_data[user_id]['keywords']
         period_hours = user_data[user_id].get('period_hours', 168)
         save_images = user_data[user_id].get('save_images', True)
+        translation_lang = user_data[user_id].get('translation_lang', 'ru')
         
         await bot.send_message(user_id, "⚡ Начинаю комбинированный поиск...")
         
@@ -2625,61 +3009,53 @@ async def collect_combined(user_id):
         title.alignment = 1
         
         now_utc10 = datetime.now(UTC_PLUS_10)
-        doc.add_paragraph(f"Дата формирования: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Тип поиска: Комбинированный")
+        doc.add_paragraph(f"Дата: {now_utc10.strftime('%d.%m.%Y %H:%M')} (UTC+10)")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
+        if translation_lang:
+            doc.add_paragraph(f"Перевод: {'Да' if translation_lang else 'Нет'}")
         doc.add_paragraph()
         
         total_results = 0
         
-        # Поиск в интернете
+        # 1. Поиск в интернете (7 поисковиков)
         if not stop_flags.get(user_id, False):
             await bot.send_message(user_id, "🌐 Ищу в интернете...")
-            doc.add_heading('РЕЗУЛЬТАТЫ ИЗ ИНТЕРНЕТА', level=1)
+            doc.add_heading('ИНТЕРНЕТ', level=1)
             
-            google_results = await search_google(keywords, 10)
-            if google_results:
-                doc.add_heading('Google', level=2)
-                for result in google_results:
+            all_web_results = await web_search.search_all(keywords, num_per_engine=5)
+            if all_web_results:
+                for result in all_web_results[:30]:  # Ограничиваем до 30
                     if stop_flags.get(user_id, False):
                         break
                     
-                    doc.add_heading(result['title'], level=3)
+                    doc.add_heading(result['title'], level=2)
+                    doc.add_paragraph(f"Источник: {result['source']}")
+                    
                     p = doc.add_paragraph()
                     p.add_run("Ссылка: ").bold = True
                     add_hyperlink(p, result['link'], result['link'])
                     
                     if result['description']:
-                        doc.add_paragraph(result['description'])
+                        desc = result['description']
+                        if translation_lang:
+                            trans_result = await translator.translate(desc, translation_lang)
+                            if trans_result['was_translated']:
+                                doc.add_paragraph(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
+                            else:
+                                doc.add_paragraph(desc)
+                        else:
+                            doc.add_paragraph(desc)
                     
                     doc.add_paragraph()
                     total_results += 1
-            
-            bing_results = await search_bing(keywords, 10)
-            if bing_results and not stop_flags.get(user_id, False):
-                doc.add_heading('Bing', level=2)
-                for result in bing_results:
-                    if stop_flags.get(user_id, False):
-                        break
-                    
-                    doc.add_heading(result['title'], level=3)
-                    p = doc.add_paragraph()
-                    p.add_run("Ссылка: ").bold = True
-                    add_hyperlink(p, result['link'], result['link'])
-                    
-                    if result['description']:
-                        doc.add_paragraph(result['description'])
-                    
-                    doc.add_paragraph()
-                    total_results += 1
-            
-            doc.add_page_break()
+                
+                doc.add_page_break()
         
-        # Глобальный поиск по Telegram
+        # 2. Глобальный поиск по Telegram
         if not stop_flags.get(user_id, False) and MASTER_SESSION:
             await bot.send_message(user_id, "🌍 Ищу по всему Telegram...")
-            doc.add_heading('РЕЗУЛЬТАТЫ ИЗ TELEGRAM (ГЛОБАЛЬНЫЙ ПОИСК)', level=1)
+            doc.add_heading('TELEGRAM (ГЛОБАЛЬНЫЙ)', level=1)
             
             client = TelegramClient(StringSession(MASTER_SESSION), API_ID, API_HASH)
             await client.connect()
@@ -2696,65 +3072,72 @@ async def collect_combined(user_id):
                         offset_rate=0,
                         offset_peer=None,
                         offset_id=0,
-                        limit=50
+                        limit=30
                     ))
                     
                     telegram_count = 0
                     if hasattr(result, 'messages') and result.messages:
-                        for msg in result.messages[:20]:  # Ограничиваем до 20 сообщений
+                        for msg in result.messages:
                             if stop_flags.get(user_id, False):
                                 break
                             
-                            if hasattr(msg, 'message') and msg.message:
-                                telegram_count += 1
-                                
-                                # Получаем информацию о чате с проверкой на None
-                                chat_title = 'Неизвестный чат'
-                                chat_username = None
-                                
-                                try:
-                                    if msg.peer_id:  # Проверяем, что peer_id не None
-                                        chat = await client.get_entity(msg.peer_id)
-                                        chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                                        chat_username = getattr(chat, 'username', None)
-                                except:
-                                    pass
-                                
-                                doc.add_heading(f"Чат: {chat_title}", level=2)
-                                if chat_username:
-                                    doc.add_paragraph(f"Ссылка: https://t.me/{chat_username}")
-                                
-                                p = doc.add_paragraph()
-                                display_date = format_datetime_utc10(msg.date)
-                                p.add_run(f"📅 {display_date}\n").bold = True
-                                
-                                if msg.message:
-                                    text = msg.message
-                                    if len(text) > 1000:
-                                        text = text[:1000] + "..."
+                            if not hasattr(msg, 'message') or not msg.message:
+                                continue
+                            
+                            telegram_count += 1
+                            
+                            chat_title = 'Неизвестный чат'
+                            chat_username = None
+                            
+                            try:
+                                if msg.peer_id:
+                                    chat = await client.get_entity(msg.peer_id)
+                                    chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                                    chat_username = getattr(chat, 'username', None)
+                                else:
+                                    continue
+                            except:
+                                pass
+                            
+                            doc.add_heading(f"Чат: {chat_title}", level=2)
+                            if chat_username:
+                                doc.add_paragraph(f"https://t.me/{chat_username}")
+                            
+                            p = doc.add_paragraph()
+                            display_date = format_datetime_utc10(msg.date)
+                            p.add_run(f"📅 {display_date}\n").bold = True
+                            
+                            if msg.message:
+                                text = msg.message[:1000]
+                                if translation_lang:
+                                    trans_result = await translator.translate(text, translation_lang)
+                                    if trans_result['was_translated']:
+                                        p.add_run(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
+                                    else:
+                                        p.add_run(text)
+                                else:
                                     p.add_run(text)
-                                
-                                if chat_username and msg.id:
-                                    link_text = f"🔗 Ссылка на сообщение"
-                                    link_url = f"https://t.me/{chat_username}/{msg.id}"
-                                    link_paragraph = doc.add_paragraph()
-                                    add_hyperlink(link_paragraph, link_text, link_url)
-                                
-                                doc.add_paragraph()
+                            
+                            if chat_username and msg.id:
+                                link_url = f"https://t.me/{chat_username}/{msg.id}"
+                                link_paragraph = doc.add_paragraph()
+                                add_hyperlink(link_paragraph, "🔗 Ссылка", link_url)
+                            
+                            doc.add_paragraph()
                     
-                    doc.add_paragraph(f"✅ Найдено сообщений в Telegram: {telegram_count}")
+                    doc.add_paragraph(f"✅ Найдено: {telegram_count}")
                     total_results += telegram_count
                     
                 except Exception as e:
-                    doc.add_paragraph(f"❌ Ошибка при глобальном поиске: {str(e)}")
+                    doc.add_paragraph(f"❌ Ошибка: {str(e)}")
             
             await client.disconnect()
             doc.add_page_break()
         
-        # Поиск по каналам из базы
+        # 3. Поиск по каналам из базы
         if not stop_flags.get(user_id, False) and MASTER_SESSION:
-            await bot.send_message(user_id, "📱 Ищу по каналам из базы...")
-            doc.add_heading('РЕЗУЛЬТАТЫ ИЗ КАНАЛОВ БАЗЫ', level=1)
+            await bot.send_message(user_id, "📱 Ищу по каналам...")
+            doc.add_heading('КАНАЛЫ ИЗ БАЗЫ', level=1)
             
             channels = load_channels()
             if channels:
@@ -2765,7 +3148,7 @@ async def collect_combined(user_id):
                     start_time = datetime.now().astimezone() - timedelta(hours=period_hours)
                     channels_count = 0
                     
-                    for channel in channels[:5]:  # Ограничиваем до 5 каналов
+                    for channel in channels[:3]:  # Ограничиваем до 3 каналов
                         if stop_flags.get(user_id, False):
                             break
                         
@@ -2774,13 +3157,13 @@ async def collect_combined(user_id):
                             entity = await client.get_entity(channel_url)
                             
                             channel_posts = 0
-                            async for message in client.iter_messages(entity, limit=10, offset_date=datetime.now()):
+                            async for message in client.iter_messages(entity, limit=5, offset_date=datetime.now()):
                                 if stop_flags.get(user_id, False):
                                     break
                                 
                                 if message.date and message.date >= start_time and message.text and keywords.lower() in message.text.lower():
                                     if channel_posts == 0:
-                                        doc.add_heading(f"Канал: {channel['name']}", level=2)
+                                        doc.add_heading(f"{channel['name']}", level=2)
                                         doc.add_paragraph(f"Ссылка: {channel_url}")
                                     
                                     channel_posts += 1
@@ -2789,65 +3172,63 @@ async def collect_combined(user_id):
                                     display_date = format_datetime_utc10(message.date)
                                     p.add_run(f"📅 {display_date}\n").bold = True
                                     
-                                    text = message.text
-                                    if len(text) > 1000:
-                                        text = text[:1000] + "..."
-                                    p.add_run(text)
+                                    text = message.text[:1000]
+                                    if translation_lang:
+                                        trans_result = await translator.translate(text, translation_lang)
+                                        if trans_result['was_translated']:
+                                            p.add_run(translator.add_translation_note(trans_result['translated'], trans_result['src_lang']))
+                                        else:
+                                            p.add_run(text)
+                                    else:
+                                        p.add_run(text)
                                     
                                     if message.id:
                                         channel_username = channel_url.split('/')[-1]
                                         link_url = f"https://t.me/{channel_username}/{message.id}"
                                         link_paragraph = doc.add_paragraph()
-                                        add_hyperlink(link_paragraph, "🔗 Ссылка на пост", link_url)
+                                        add_hyperlink(link_paragraph, "🔗 Ссылка", link_url)
                                     
                                     doc.add_paragraph()
                             
                             if channel_posts > 0:
-                                doc.add_paragraph(f"✅ Найдено постов в канале: {channel_posts}")
+                                doc.add_paragraph(f"✅ Найдено: {channel_posts}")
                                 channels_count += 1
                                 total_results += channel_posts
                             
                         except Exception as e:
                             continue
                     
-                    doc.add_paragraph(f"📊 Всего каналов с результатами: {channels_count}")
+                    doc.add_paragraph(f"📊 Каналов с результатами: {channels_count}")
                 
                 await client.disconnect()
         
-        doc.add_heading('ИТОГОВАЯ СТАТИСТИКА', level=1)
-        doc.add_paragraph(f"Всего найдено результатов: {total_results}")
+        doc.add_heading('ИТОГО', level=1)
+        doc.add_paragraph(f"Всего результатов: {total_results}")
         doc.add_paragraph(f"Ключевые слова: {keywords}")
         doc.add_paragraph(f"Период: {user_data[user_id].get('period_text', format_period(period_hours))}")
-        doc.add_paragraph(f"Формат отчета: {'с картинками' if save_images else 'только текст'}")
         
         if total_results == 0:
             await bot.send_message(
                 user_id, 
-                f"📭 Комбинированный поиск завершен\n\n"
-                f"Не найдено результатов для запроса: {keywords}",
+                f"📭 Ничего не найдено: {keywords}",
                 reply_markup=get_main_keyboard(user_id)
             )
-            
             if user_id in user_data:
                 del user_data[user_id]
-            
             return
         
-        output_file = f"combined_report_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
+        output_file = f"combined_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
         doc.save(output_file)
         
         with open(output_file, 'rb') as f:
             caption = f"✅ Комбинированный поиск завершен!\n\n"
-            caption += f"📊 Всего найдено результатов: {total_results}\n"
-            caption += f"🔍 Ключевые слова: {keywords}\n"
+            caption += f"📊 Всего: {total_results}\n"
+            caption += f"🔍 Слова: {keywords}\n"
             caption += f"⏱ Период: {user_data[user_id].get('period_text', format_period(period_hours))}\n"
-            caption += f"🖼️ Формат: {'с картинками' if save_images else 'только текст'}\n"
+            if translation_lang:
+                caption += f"🌍 Перевод: {translation_lang}\n"
             
-            await bot.send_document(
-                user_id, 
-                f, 
-                caption=caption
-            )
+            await bot.send_document(user_id, f, caption=caption)
         
         if os.path.exists(output_file):
             os.remove(output_file)
@@ -2861,32 +3242,23 @@ async def collect_combined(user_id):
             del stop_flags[user_id]
         
     except Exception as e:
-        await bot.send_message(user_id, f"❌ Произошла ошибка: {str(e)}")
-        logging.error(f"Error for user {user_id}: {e}")
-        
+        await bot.send_message(user_id, f"❌ Ошибка: {str(e)}")
+        logging.error(f"Error: {e}")
         cleanup_temp_files(user_id)
-        
         if user_id in user_data:
             del user_data[user_id]
-        
         if user_id in stop_flags:
             del stop_flags[user_id]
 
-# ========== ОБРАБОТЧИКИ ИНЛАЙН-КНОПОК ==========
+# ========== КОЛБЭКИ ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('delete_'))
 async def process_delete_callback(callback_query: types.CallbackQuery):
-    """Обрабатывает удаление канала (только для админа)"""
     await bot.answer_callback_query(callback_query.id)
     
     user_id = callback_query.from_user.id
     
-    # Проверяем, админ ли пользователь
-    if not is_admin(user_id):
-        await bot.send_message(
-            user_id,
-            "❌ Удаление каналов доступно только администратору.",
-            reply_markup=get_main_keyboard(user_id)
-        )
+    if not security.verify_owner(user_id):
+        await bot.send_message(user_id, "❌ Только для администратора.")
         return
     
     data = callback_query.data
@@ -2894,49 +3266,40 @@ async def process_delete_callback(callback_query: types.CallbackQuery):
     
     if data == "delete_all":
         save_channels([])
-        await bot.send_message(
-            user_id,
-            "🗑 Все каналы удалены из общего списка",
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await bot.send_message(user_id, "🗑 Все каналы удалены", reply_markup=get_main_keyboard(user_id))
         return
     
     index = int(data.split('_')[1])
     if index < len(channels):
         deleted = channels.pop(index)
         save_channels(channels)
-        
         await bot.send_message(
             user_id,
-            f"🗑 Канал удален из общего списка\n\n"
-            f"Название: {deleted['name']}\n"
-            f"Ссылка: {deleted['url']}\n\n"
-            f"Осталось каналов: {len(channels)}",
+            f"🗑 Удален: {deleted['name']}\nОсталось: {len(channels)}",
             reply_markup=get_main_keyboard(user_id)
         )
 
 @dp.callback_query_handler(lambda c: c.data == 'back_to_main')
 async def process_back_callback(callback_query: types.CallbackQuery):
-    """Возврат в главное меню"""
     await bot.answer_callback_query(callback_query.id)
-    
     user_id = callback_query.from_user.id
     
-    # Очищаем состояние пользователя
     if user_id in user_data:
         del user_data[user_id]
     
-    await bot.send_message(
-        user_id,
-        "Главное меню:",
-        reply_markup=get_main_keyboard(user_id)
-    )
+    await bot.send_message(user_id, "Главное меню:", reply_markup=get_main_keyboard(user_id))
 
-# ========== ОБРАБОТЧИК НЕИЗВЕСТНЫХ КОМАНД ==========
+# ========== НЕИЗВЕСТНЫЕ КОМАНДЫ ==========
 @dp.message_handler()
 async def handle_unknown(message: types.Message):
-    """Обработка неизвестных команд"""
     user_id = message.from_user.id
+    
+    if not security.validate_telegram_request(message):
+        return
+    
+    if not security.check_rate_limit(user_id):
+        await message.reply("⏳ Слишком много запросов.")
+        return
     
     if is_admin(user_id) and user_id in auth_data:
         if auth_data[user_id].get('state') == 'waiting_phone':
@@ -2954,40 +3317,27 @@ async def handle_unknown(message: types.Message):
         await process_channel_link(message)
     else:
         await message.reply(
-            "Я не понимаю эту команду.\n"
-            "Используй кнопки внизу экрана 👇",
+            "Используй кнопки 👇",
             reply_markup=get_main_keyboard(user_id)
         )
 
 # ========== ЗАПУСК ==========
 if __name__ == '__main__':
-    # Загружаем мастер-сессию при старте
     MASTER_SESSION = load_master_session()
-    
-    # Загружаем общий список каналов
     channels = load_channels()
     
+    print("=" * 50)
     print("🤖 Бот запускается...")
-    print(f"👑 Администратор ID: {ADMIN_ID}")
-    print(f"📊 Всего каналов в базе: {len(channels)}")
-    print(f"📁 Папки: {SESSIONS_DIR}, {IMAGES_DIR}, {UPLOADS_DIR}")
-    print(f"🌏 Часовой пояс: UTC+10")
-    print(f"⏱ Максимальный период: {MAX_PERIOD_DAYS} дней")
-    print(f"🔍 Типы поиска: Каналы, Глобальный Telegram, Интернет, Комбинированный")
-    
-    # Показываем список каналов для проверки
-    if channels:
-        print("\n📋 Список каналов:")
-        for i, ch in enumerate(channels, 1):
-            print(f"  {i}. {ch['name']} - {ch['url']}")
-    else:
-        print("\n📭 Список каналов пуст")
+    print(f"👑 Админ ID: {ADMIN_ID}")
+    print(f"📊 Каналов: {len(channels)}")
+    print(f"🔍 Поисковиков: 7 (Google, Bing, Yahoo, Yandex, DuckDuckGo, Baidu, Ask)")
+    print(f"🌍 Перевод: {'Доступен' if TRANSLATION_AVAILABLE else 'Недоступен'}")
+    print(f"🛡️ Безопасность: Включена")
+    print("=" * 50)
     
     if MASTER_SESSION:
         print("✅ Мастер-сессия загружена")
     else:
-        print("⚠️ Мастер-сессия не найдена. Администратору нужно авторизоваться при первом использовании.")
+        print("⚠️ Мастер-сессия не найдена")
     
-    # Запускаем бота
-    from aiogram import executor
     executor.start_polling(dp, skip_updates=True)
