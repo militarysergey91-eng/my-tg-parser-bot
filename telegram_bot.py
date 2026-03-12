@@ -31,6 +31,7 @@ from telethon.errors import FloodWaitError, SessionPasswordNeededError, PhoneCod
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import SearchGlobalRequest
 from telethon.tl.types import InputMessagesFilterEmpty, InputMessagesFilterPhotos, InputMessagesFilterDocument, InputMessagesFilterVideo
+from telethon.tl.types import PeerUser, PeerChat, PeerChannel
 
 # ========== НАСТРОЙКИ ==========
 API_TOKEN = '8029293386:AAG-Hih0eVun77YYcY8zf6PyDjQERmQCx9w'  # Твой токен
@@ -507,87 +508,6 @@ async def search_bing(query, num_results=20):
     except Exception as e:
         print(f"Ошибка поиска в Bing: {e}")
         return []
-
-async def search_telegram_global(query, client, limit=100):
-    """Глобальный поиск по всему Telegram"""
-    try:
-        results = []
-        
-        # Используем SearchGlobalRequest для глобального поиска
-        result = await client(SearchGlobalRequest(
-            q=query,
-            filter=InputMessagesFilterEmpty(),
-            min_date=None,
-            max_date=None,
-            offset_rate=0,
-            offset_peer=None,
-            offset_id=0,
-            limit=limit
-        ))
-        
-        if hasattr(result, 'messages'):
-            for msg in result.messages:
-                if hasattr(msg, 'message') and msg.message:
-                    # Получаем информацию о чате
-                    try:
-                        chat = await client.get_entity(msg.peer_id)
-                        chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                        chat_username = getattr(chat, 'username', None)
-                    except:
-                        chat_title = 'Неизвестный чат'
-                        chat_username = None
-                    
-                    results.append({
-                        'message': msg.message,
-                        'date': msg.date,
-                        'chat_title': chat_title,
-                        'chat_username': chat_username,
-                        'message_id': msg.id,
-                        'source': 'Telegram Global'
-                    })
-        
-        return results
-    except Exception as e:
-        print(f"Ошибка глобального поиска в Telegram: {e}")
-        return []
-
-async def search_telegram_channels(query, channels, client, period_hours, save_images, user_id):
-    """Поиск по заданным каналам Telegram"""
-    results = []
-    start_time = datetime.now().astimezone() - timedelta(hours=period_hours)
-    
-    for channel in channels:
-        if stop_flags.get(user_id, False):
-            break
-        
-        try:
-            channel_url = normalize_channel_url(channel['url'])
-            entity = await client.get_entity(channel_url)
-            
-            async for message in client.iter_messages(entity, offset_date=datetime.now(), reverse=False):
-                if stop_flags.get(user_id, False):
-                    break
-                
-                if message.date:
-                    msg_date = message.date
-                    if msg_date.tzinfo is None:
-                        msg_date = msg_date.replace(tzinfo=timezone.utc)
-                    if msg_date < start_time:
-                        break
-                
-                if message.text and query.lower() in message.text.lower():
-                    results.append({
-                        'message': message,
-                        'channel_name': channel['name'],
-                        'channel_url': channel_url,
-                        'date': message.date,
-                        'source': 'Telegram Channel'
-                    })
-        except Exception as e:
-            print(f"Ошибка при поиске в канале {channel['name']}: {e}")
-            continue
-    
-    return results
 
 # ========== ФУНКЦИИ ДЛЯ ПРОВЕРКИ АДМИНА ==========
 def is_admin(user_id):
@@ -2364,7 +2284,7 @@ async def collect_from_channels(user_id):
             await client.disconnect()
 
 async def collect_global_telegram(user_id):
-    """Глобальный поиск по всему Telegram"""
+    """Глобальный поиск по всему Telegram (исправленная версия)"""
     client = None
     try:
         stop_flags[user_id] = False
@@ -2439,14 +2359,24 @@ async def collect_global_telegram(user_id):
                     if hasattr(msg, 'message') and msg.message:
                         total_posts += 1
                         
-                        # Получаем информацию о чате
+                        # Получаем информацию о чате с проверкой на None
+                        chat_title = 'Неизвестный чат'
+                        chat_username = None
+                        
                         try:
-                            chat = await client.get_entity(msg.peer_id)
-                            chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                            chat_username = getattr(chat, 'username', None)
-                        except:
+                            if msg.peer_id:  # Проверяем, что peer_id не None
+                                chat = await client.get_entity(msg.peer_id)
+                                chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                                chat_username = getattr(chat, 'username', None)
+                            else:
+                                # Если peer_id None, пропускаем сообщение
+                                await bot.send_message(user_id, f"⚠️ Пропущено сообщение без информации о чате")
+                                continue
+                        except Exception as e:
+                            # Если не удалось получить информацию о чате, используем заглушку
                             chat_title = 'Неизвестный чат'
                             chat_username = None
+                            await bot.send_message(user_id, f"⚠️ Не удалось получить информацию о чате для сообщения")
                         
                         doc.add_heading(f"Чат: {chat_title}", level=2)
                         if chat_username:
@@ -2519,7 +2449,9 @@ async def collect_global_telegram(user_id):
                 os.remove(output_file)
             
         except Exception as e:
-            await bot.send_message(user_id, f"❌ Ошибка при глобальном поиске: {str(e)}")
+            error_msg = str(e)
+            await bot.send_message(user_id, f"❌ Ошибка при глобальном поиске: {error_msg}")
+            doc.add_paragraph(f"❌ Ошибка при выполнении поиска: {error_msg}")
         
         cleanup_temp_files(user_id)
         
@@ -2776,13 +2708,17 @@ async def collect_combined(user_id):
                             if hasattr(msg, 'message') and msg.message:
                                 telegram_count += 1
                                 
+                                # Получаем информацию о чате с проверкой на None
+                                chat_title = 'Неизвестный чат'
+                                chat_username = None
+                                
                                 try:
-                                    chat = await client.get_entity(msg.peer_id)
-                                    chat_title = getattr(chat, 'title', 'Неизвестный чат')
-                                    chat_username = getattr(chat, 'username', None)
+                                    if msg.peer_id:  # Проверяем, что peer_id не None
+                                        chat = await client.get_entity(msg.peer_id)
+                                        chat_title = getattr(chat, 'title', 'Неизвестный чат')
+                                        chat_username = getattr(chat, 'username', None)
                                 except:
-                                    chat_title = 'Неизвестный чат'
-                                    chat_username = None
+                                    pass
                                 
                                 doc.add_heading(f"Чат: {chat_title}", level=2)
                                 if chat_username:
