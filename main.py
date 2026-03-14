@@ -504,24 +504,30 @@ async def show_channels(m: types.Message):
         return
     
     # Создаем клавиатуру со списком каналов
-    kb = InlineKeyboardMarkup(row_width=1)
+    kb = InlineKeyboardMarkup(row_width=2)
     
     for i, ch in enumerate(channels):
-        # Кнопка с названием канала (открывает ссылку)
-        btn = InlineKeyboardButton(f"📢 {ch['name']}", url=ch['url'])
+        # Текст кнопки с названием канала
+        btn_text = f"📢 {ch['name']}"
         
         if is_admin(user_id):
-            # Для админа добавляем кнопку удаления
-            del_btn = InlineKeyboardButton("❌", callback_data=f"del_{i}")
+            # Для админа - две кнопки в ряд: название и удалить
+            btn = InlineKeyboardButton(btn_text, url=ch['url'])
+            del_btn = InlineKeyboardButton("❌ Удалить", callback_data=f"delete_{i}")
             kb.row(btn, del_btn)
         else:
-            # Для обычных пользователей только кнопка с ссылкой
+            # Для обычных пользователей только одна кнопка
+            btn = InlineKeyboardButton(btn_text, url=ch['url'])
             kb.add(btn)
     
     if is_admin(user_id):
-        kb.add(InlineKeyboardButton("❌ Удалить все", callback_data="del_all"))
-    
-    kb.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
+        # Добавляем кнопки управления для админа
+        kb.add(
+            InlineKeyboardButton("❌ Удалить все каналы", callback_data="delete_all"),
+            InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")
+        )
+    else:
+        kb.add(InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main"))
     
     # Формируем текст сообщения
     text = "📋 Список групп и каналов:\n\n"
@@ -530,7 +536,9 @@ async def show_channels(m: types.Message):
     
     text += f"\nВсего групп/каналов: {len(channels)}"
     
-    if not is_admin(user_id):
+    if is_admin(user_id):
+        text += "\n\n🔹 Нажми на название чтобы перейти\n🔹 Нажми ❌ Удалить чтобы удалить канал"
+    else:
         text += "\n\nℹ️ Нажми на название чтобы перейти"
     
     await m.reply(text, reply_markup=kb)
@@ -776,22 +784,9 @@ async def back(m: types.Message):
     user_id = m.from_user.id
     
     if user_id in user_data:
-        state = user_data[user_id].get('state')
-        
-        if state == 'waiting_search_type':
-            del user_data[user_id]
-            await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
-        elif state == 'waiting_import_type':
-            del user_data[user_id]
-            await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
-        elif state in ['waiting_keywords', 'waiting_period', 'waiting_excel_file', 'waiting_txt_file']:
-            del user_data[user_id]
-            await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
-        else:
-            del user_data[user_id]
-            await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
-    else:
-        await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
+        del user_data[user_id]
+    
+    await m.reply("Главное меню", reply_markup=get_main_keyboard(user_id))
 
 @dp.message_handler(lambda m: m.text == "◀️ Назад в меню")
 async def back_to_menu(m: types.Message):
@@ -1148,70 +1143,94 @@ async def collect_from_channels(user_id):
             del stop_flags[user_id]
 
 # ========== КОЛБЭКИ ==========
-@dp.callback_query_handler(lambda c: c.data.startswith('del_'))
-async def delete_callback(call: types.CallbackQuery):
+@dp.callback_query_handler(lambda c: True)
+async def handle_callbacks(call: types.CallbackQuery):
+    """Единый обработчик всех колбэков"""
     await bot.answer_callback_query(call.id)
     
     user_id = call.from_user.id
+    data = call.data
+    
+    print(f"Получен колбэк: {data} от пользователя {user_id}")  # Отладка
+    
+    # Обработка возврата в главное меню
+    if data == "back_to_main":
+        if user_id in user_data:
+            del user_data[user_id]
+        await bot.send_message(user_id, "Главное меню", reply_markup=get_main_keyboard(user_id))
+        await call.message.delete()
+        return
+    
+    # Только админ может выполнять удаление
     if not is_admin(user_id):
         await bot.send_message(user_id, "❌ Только для админа")
         return
     
-    data = call.data
-    channels = load_channels()
-    
-    if data == "del_all":
-        save_channels([])
-        await bot.send_message(user_id, "🗑 Все группы/каналы удалены", reply_markup=get_main_keyboard(user_id))
-        # Удаляем сообщение с клавиатурой
-        await call.message.delete()
+    # Обработка удаления всех каналов
+    if data == "delete_all":
+        channels = load_channels()
+        if channels:
+            save_channels([])
+            await bot.send_message(user_id, f"🗑 Удалено всех каналов: {len(channels)}", reply_markup=get_main_keyboard(user_id))
+            await call.message.delete()
+        else:
+            await bot.send_message(user_id, "📭 Нет каналов для удаления")
         return
     
-    # Удаление одного канала
-    idx = int(data.split('_')[1])
-    if 0 <= idx < len(channels):
-        deleted = channels.pop(idx)
-        save_channels(channels)
+    # Обработка удаления одного канала
+    if data.startswith("delete_"):
+        try:
+            # Получаем индекс из данных
+            idx = int(data.split("_")[1])
+            
+            # Загружаем текущие каналы
+            channels = load_channels()
+            
+            # Проверяем, что индекс валидный
+            if 0 <= idx < len(channels):
+                # Удаляем канал
+                deleted = channels.pop(idx)
+                save_channels(channels)
+                
+                # Отправляем сообщение об успехе
+                await bot.send_message(user_id, f"✅ Канал удален: {deleted['name']}")
+                
+                # Обновляем сообщение со списком каналов
+                if channels:
+                    # Создаем новую клавиатуру
+                    kb = InlineKeyboardMarkup(row_width=2)
+                    
+                    for i, ch in enumerate(channels):
+                        btn = InlineKeyboardButton(f"📢 {ch['name']}", url=ch['url'])
+                        del_btn = InlineKeyboardButton("❌ Удалить", callback_data=f"delete_{i}")
+                        kb.row(btn, del_btn)
+                    
+                    kb.add(
+                        InlineKeyboardButton("❌ Удалить все каналы", callback_data="delete_all"),
+                        InlineKeyboardButton("◀️ Назад в меню", callback_data="back_to_main")
+                    )
+                    
+                    # Формируем текст
+                    text = "📋 Список групп и каналов:\n\n"
+                    for i, ch in enumerate(channels, 1):
+                        text += f"{i}. {ch['name']}\n"
+                    
+                    text += f"\nВсего групп/каналов: {len(channels)}"
+                    
+                    # Редактируем сообщение
+                    await call.message.edit_text(text, reply_markup=kb)
+                else:
+                    # Если каналов больше нет
+                    await call.message.edit_text("📭 Нет добавленных групп/каналов")
+            else:
+                await bot.send_message(user_id, f"❌ Ошибка: канал с индексом {idx} не найден")
+                
+        except ValueError as e:
+            await bot.send_message(user_id, f"❌ Ошибка при обработке запроса: {e}")
+        except Exception as e:
+            await bot.send_message(user_id, f"❌ Неизвестная ошибка: {e}")
         
-        # Отправляем сообщение об успешном удалении
-        await bot.send_message(user_id, f"🗑 Удалена группа/канал: {deleted['name']}", reply_markup=get_main_keyboard(user_id))
-        
-        # Обновляем сообщение со списком каналов
-        if channels:
-            # Создаем новую клавиатуру
-            kb = InlineKeyboardMarkup(row_width=1)
-            
-            for i, ch in enumerate(channels):
-                btn = InlineKeyboardButton(f"📢 {ch['name']}", url=ch['url'])
-                del_btn = InlineKeyboardButton("❌", callback_data=f"del_{i}")
-                kb.row(btn, del_btn)
-            
-            kb.add(InlineKeyboardButton("❌ Удалить все", callback_data="del_all"))
-            kb.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
-            
-            # Формируем текст
-            text = "📋 Список групп и каналов:\n\n"
-            for i, ch in enumerate(channels, 1):
-                text += f"{i}. {ch['name']}\n"
-            
-            text += f"\nВсего групп/каналов: {len(channels)}"
-            
-            # Редактируем сообщение
-            await call.message.edit_text(text, reply_markup=kb)
-        else:
-            # Если каналов больше нет
-            await call.message.edit_text("📭 Нет добавленных групп/каналов")
-    else:
-        await bot.send_message(user_id, "❌ Ошибка: канал не найден")
-
-@dp.callback_query_handler(lambda c: c.data == 'back_to_main')
-async def back_callback(call: types.CallbackQuery):
-    await bot.answer_callback_query(call.id)
-    user_id = call.from_user.id
-    if user_id in user_data:
-        del user_data[user_id]
-    await bot.send_message(user_id, "Главное меню", reply_markup=get_main_keyboard(user_id))
-    await call.message.delete()
+        return
 
 # ========== НЕИЗВЕСТНЫЕ КОМАНДЫ ==========
 @dp.message_handler()
