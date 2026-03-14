@@ -1149,7 +1149,7 @@ async def collect_from_channels(user_id):
 
 # ========== КОЛБЭКИ ==========
 @dp.callback_query_handler(lambda c: c.data.startswith('del_'))
-async def delete_callback(call):
+async def delete_callback(call: types.CallbackQuery):
     await bot.answer_callback_query(call.id)
     
     user_id = call.from_user.id
@@ -1163,21 +1163,55 @@ async def delete_callback(call):
     if data == "del_all":
         save_channels([])
         await bot.send_message(user_id, "🗑 Все группы/каналы удалены", reply_markup=get_main_keyboard(user_id))
+        # Удаляем сообщение с клавиатурой
+        await call.message.delete()
         return
     
+    # Удаление одного канала
     idx = int(data.split('_')[1])
-    if idx < len(channels):
+    if 0 <= idx < len(channels):
         deleted = channels.pop(idx)
         save_channels(channels)
+        
+        # Отправляем сообщение об успешном удалении
         await bot.send_message(user_id, f"🗑 Удалена группа/канал: {deleted['name']}", reply_markup=get_main_keyboard(user_id))
+        
+        # Обновляем сообщение со списком каналов
+        if channels:
+            # Создаем новую клавиатуру
+            kb = InlineKeyboardMarkup(row_width=1)
+            
+            for i, ch in enumerate(channels):
+                btn = InlineKeyboardButton(f"📢 {ch['name']}", url=ch['url'])
+                del_btn = InlineKeyboardButton("❌", callback_data=f"del_{i}")
+                kb.row(btn, del_btn)
+            
+            kb.add(InlineKeyboardButton("❌ Удалить все", callback_data="del_all"))
+            kb.add(InlineKeyboardButton("◀️ Назад", callback_data="back_to_main"))
+            
+            # Формируем текст
+            text = "📋 Список групп и каналов:\n\n"
+            for i, ch in enumerate(channels, 1):
+                text += f"{i}. {ch['name']}\n"
+            
+            text += f"\nВсего групп/каналов: {len(channels)}"
+            
+            # Редактируем сообщение
+            await call.message.edit_text(text, reply_markup=kb)
+        else:
+            # Если каналов больше нет
+            await call.message.edit_text("📭 Нет добавленных групп/каналов")
+    else:
+        await bot.send_message(user_id, "❌ Ошибка: канал не найден")
 
 @dp.callback_query_handler(lambda c: c.data == 'back_to_main')
-async def back_callback(call):
+async def back_callback(call: types.CallbackQuery):
     await bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     if user_id in user_data:
         del user_data[user_id]
     await bot.send_message(user_id, "Главное меню", reply_markup=get_main_keyboard(user_id))
+    await call.message.delete()
 
 # ========== НЕИЗВЕСТНЫЕ КОМАНДЫ ==========
 @dp.message_handler()
