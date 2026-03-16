@@ -110,6 +110,58 @@ class TranslatorManager:
 
 translator = TranslatorManager()
 
+# ========== ФУНКЦИЯ ДЛЯ ОБРАБОТКИ ПОИСКОВЫХ ЗАПРОСОВ ==========
+def parse_search_keywords(text):
+    """
+    Парсит поисковый запрос, поддерживая:
+    - Разные регистры (преобразует в нижний для поиска)
+    - Несколько запросов через запятую
+    - Удаляет лишние пробелы
+    """
+    if not text:
+        return []
+    
+    # Приводим к нижнему регистру для единообразия
+    text = text.lower().strip()
+    
+    # Если запрос "все" - специальный случай
+    if text == 'все' or text == 'всё':
+        return ['все']
+    
+    # Разделяем по запятой и очищаем каждый запрос
+    keywords = []
+    for keyword in text.split(','):
+        # Удаляем лишние пробелы в начале и конце
+        keyword = keyword.strip()
+        # Удаляем множественные пробелы внутри запроса
+        keyword = re.sub(r'\s+', ' ', keyword)
+        if keyword:  # Добавляем только непустые запросы
+            keywords.append(keyword)
+    
+    return keywords
+
+def text_matches_keywords(text, keywords):
+    """
+    Проверяет, соответствует ли текст хотя бы одному ключевому слову
+    Поддерживает множественные запросы через запятую
+    """
+    if not text or not keywords:
+        return False
+    
+    # Приводим текст к нижнему регистру для сравнения
+    text_lower = text.lower()
+    
+    # Специальный случай - запрос "все"
+    if keywords == ['все']:
+        return True
+    
+    # Проверяем каждое ключевое слово
+    for keyword in keywords:
+        if keyword in text_lower:
+            return True
+    
+    return False
+
 # ========== РАБОТА С ФАЙЛАМИ ==========
 def load_channels():
     if os.path.exists(CHANNELS_FILE):
@@ -706,7 +758,14 @@ async def search_menu(m: types.Message):
         await m.reply("❌ Нет доступных групп/каналов для поиска", reply_markup=get_main_keyboard(user_id))
         return
     
-    await m.reply("🔍 Введи ключевые слова для поиска по группам:", reply_markup=get_main_keyboard(user_id))
+    await m.reply(
+        "🔍 Введи ключевые слова для поиска по группам:\n\n"
+        "📝 Можно писать в любом регистре\n"
+        "📝 Несколько запросов через запятую\n"
+        "📝 Пример: машина, авто, автомобиль\n"
+        "📝 Или просто: машина",
+        reply_markup=get_main_keyboard(user_id)
+    )
     user_data[user_id] = {'state': 'waiting_keywords', 'channels': channels}
 
 @dp.message_handler(lambda m: m.text == "🔄 Собрать всё")
@@ -740,7 +799,11 @@ async def help_cmd(m: types.Message):
             "⏹️ Стоп - остановить поиск\n"
             "🚪 Выйти - выйти из аккаунта\n\n"
             "🌍 Перевод: автоматический на русский\n"
-            "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
+            "⌨️ Свой период: 30 минут, 2 часа, 5 дней\n\n"
+            "🔍 Поисковые запросы:\n"
+            "• Можно писать в любом регистре\n"
+            "• Несколько запросов через запятую\n"
+            "• Пример: машина, авто, автомобиль"
         )
     else:
         text = (
@@ -749,7 +812,11 @@ async def help_cmd(m: types.Message):
             "🔍 Поиск - начать поиск по ключевым словам в группах\n"
             "⏹️ Стоп - остановить поиск\n\n"
             "🌍 Перевод: автоматический на русский\n"
-            "⌨️ Свой период: 30 минут, 2 часа, 5 дней"
+            "⌨️ Свой период: 30 минут, 2 часа, 5 дней\n\n"
+            "🔍 Поисковые запросы:\n"
+            "• Можно писать в любом регистре\n"
+            "• Несколько запросов через запятую\n"
+            "• Пример: машина, авто, автомобиль"
         )
     
     await m.reply(text)
@@ -910,12 +977,26 @@ async def process_channel(m: types.Message):
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_keywords')
 async def process_keywords(m: types.Message):
     user_id = m.from_user.id
-    keywords = m.text.strip()
+    keywords_text = m.text.strip()
+    
+    # Парсим ключевые слова
+    keywords = parse_search_keywords(keywords_text)
+    
+    if not keywords:
+        await m.reply("❌ Пожалуйста, введите хотя бы одно ключевое слово")
+        return
+    
+    # Формируем информационное сообщение о том, что ищем
+    if keywords == ['все']:
+        search_info = "🔍 Буду собирать ВСЕ сообщения"
+    else:
+        search_info = f"🔍 Ищу сообщения, содержащие: {', '.join(keywords)}"
     
     user_data[user_id]['keywords'] = keywords
+    user_data[user_id]['keywords_text'] = keywords_text
     user_data[user_id]['state'] = 'waiting_period'
     
-    await m.reply("⏱ За какой период ищем в группах?", reply_markup=get_period_keyboard())
+    await m.reply(f"{search_info}\n\n⏱ За какой период ищем в группах?", reply_markup=get_period_keyboard())
 
 @dp.message_handler(lambda m: m.from_user.id in user_data and user_data[m.from_user.id].get('state') == 'waiting_period')
 async def process_period(m: types.Message):
@@ -994,7 +1075,18 @@ async def process_image(m: types.Message):
     save_images = (text == "🖼️ С картинками")
     user_data[user_id]['save_images'] = save_images
     
-    await m.reply(f"🔍 Начинаю поиск по группам...\nЭто может занять время", reply_markup=get_main_keyboard(user_id))
+    # Формируем информационное сообщение о начале поиска
+    keywords = user_data[user_id]['keywords']
+    if keywords == ['все']:
+        search_info = "ВСЕ сообщения"
+    else:
+        search_info = f"сообщения с: {', '.join(keywords)}"
+    
+    await m.reply(
+        f"🔍 Начинаю поиск {search_info} за {user_data[user_id]['period_text']}...\n"
+        f"Это может занять некоторое время",
+        reply_markup=get_main_keyboard(user_id)
+    )
     
     await collect_from_channels(user_id)
 
@@ -1005,7 +1097,7 @@ async def collect_from_channels(user_id):
         stop_flags[user_id] = False
         
         data = user_data[user_id]
-        keywords = data['keywords']
+        keywords = data['keywords']  # Теперь это список ключевых слов
         channels = data['channels']
         hours = data['period_hours']
         save_images = data['save_images']
@@ -1026,7 +1118,13 @@ async def collect_from_channels(user_id):
         doc = Document()
         doc.add_heading('Поиск по Telegram группам и каналам', 0).alignment = 1
         doc.add_paragraph(f"Дата: {datetime.now(UTC_PLUS_10).strftime('%d.%m.%Y %H:%M')} (UTC+10)")
-        doc.add_paragraph(f"Ключевые слова: {keywords}")
+        
+        # Записываем информацию о поисковых запросах
+        if keywords == ['все']:
+            doc.add_paragraph("Поиск: ВСЕ сообщения")
+        else:
+            doc.add_paragraph(f"Ключевые слова: {', '.join(keywords)}")
+        
         doc.add_paragraph(f"Период: {data['period_text']}")
         doc.add_paragraph("Перевод: на русский язык")
         doc.add_paragraph()
@@ -1063,7 +1161,8 @@ async def collect_from_channels(user_id):
                         if d < start:
                             break
                     
-                    if keywords.lower() == 'все' or (msg.text and keywords.lower() in msg.text.lower()):
+                    # Проверяем соответствие ключевым словам (с учетом регистра)
+                    if keywords == ['все'] or (msg.text and text_matches_keywords(msg.text, keywords)):
                         posts.append(msg)
                         count += 1
                         total += 1
@@ -1266,6 +1365,11 @@ if __name__ == '__main__':
     print(f"👑 Админ ID: {ADMIN_ID}")
     print(f"📊 Групп/каналов в базе: {len(channels)}")
     print(f"🌍 Перевод: всегда на русский")
+    print("=" * 50)
+    print("\n🔍 Поиск поддерживает:")
+    print("• Запросы в любом регистре")
+    print("• Несколько запросов через запятую")
+    print("• Пример: машина, авто, автомобиль")
     print("=" * 50)
     
     executor.start_polling(dp, skip_updates=True)
